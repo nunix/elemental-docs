@@ -1,6 +1,7 @@
 /.dapper
 /.env
 /.cache
+/.docusaurus
 /bin
 /dist
 /build
@@ -14,3 +15,4 @@
 /cypress/downloads/*
 /node_modules
 package-lock.json
+yarn.lock
