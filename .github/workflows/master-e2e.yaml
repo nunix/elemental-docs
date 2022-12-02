@@ -149,6 +149,7 @@ jobs:
         id: installation
         env:
           CA_TYPE: ${{ inputs.ca_type }}
+          TEST_TYPE: ${{ inputs.test_type }}
         run: |
           export MY_HOSTNAME=$(hostname -f)
           echo "MY_HOSTNAME=$MY_HOSTNAME" >> $GITHUB_OUTPUT
@@ -169,6 +170,7 @@ jobs:
             cypress/e2e/unit_tests/user.spec.ts
             cypress/e2e/unit_tests/menu.spec.ts
             cypress/e2e/unit_tests/machine_registration.spec.ts
+            cypress/e2e/unit_tests/advanced_filtering.spec.ts
         run: make -f tests/Makefile start-cypress-tests
       - name: Upload Cypress screenshots (Basics)
         if: failure()
@@ -294,7 +296,7 @@ jobs:
         if: always()
         run: |
           # Remove all VMs
-          for I in $(sudo virsh list | awk '/node-/ { print $2 }'); do
+          for I in $(sudo virsh list --all| awk '/node-/ { print $2 }'); do
             for C in destroy undefine; do
               [[ "${C}" == "undefine" ]] && OPT="--nvram" || unset OPT
               sudo virsh ${C} ${OPT} ${I} >/dev/null 2>&1 || true

@@ -27,11 +27,11 @@ describe('Machine registration testing', () => {
     cy.exec('kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml delete ns mynamespace', {failOnNonZeroExit: false});
     
     // Delete all existing machine registrations
-    cy.contains('Manage Machine Registrations').click();
-    cy.get('.outlet > header').contains('Machine Registrations');
+    cy.contains('Manage Registration Endpoints').click();
+    cy.get('.outlet > header').contains('Registration Endpoints');
     cy.get('body').then(($body) => {
       if (!$body.text().includes('There are no rows to show.')) {
-        cy.deleteAllMachReg();
+        cy.deleteAllResources();
       };
     });
   });
@@ -43,10 +43,6 @@ describe('Machine registration testing', () => {
 
   it('Create machine registration with labels and annotations', () => {
     cy.createMachReg({machRegName: 'labels-annotations-test', checkLabels: true, checkAnnotations: true});
-  });
-
-  it.skip('Create machine registration with custom cloud-config', () => {
-      // Cannot be tested yet due to https://github.com/rancher/dashboard/issues/6458
   });
 
   it('Delete machine registration', () => {
@@ -81,7 +77,7 @@ describe('Machine registration testing', () => {
     cy.contains('li', 'Clone').click();
     cy.typeValue({label: 'Name', value: 'cloned-machine-reg'});
     cy.clickButton('Create');
-    cy.contains('.masthead', 'Machine Registration: cloned-machine-reg Active').should('exist');
+    cy.contains('.masthead', 'Registration Endpoint: cloned-machine-regActive').should('exist');
     
     // Check that we got the same label and annotation in both machine registration
     cy.checkMachRegLabel({machRegName: 'cloned-machine-reg', labelName: 'myLabel1', labelValue: 'myLabelValue1'});
@@ -98,4 +94,10 @@ describe('Machine registration testing', () => {
     cy.verifyDownload('download-yaml-test.yaml');
   });
 
+  // This test must stay the last one because we use this machine registration when we test adding a node.
+  // It also tests using a custom cloud config by using read from file button.
+  it('Create Machine registration we will use to test adding a node', () => {
+    cy.createMachReg({machRegName: 'machine-registration', checkInventoryLabels: true, checkInventoryAnnotations: true, customCloudConfig: 'custom_cloud-config.yaml', checkDefaultCloudConfig: false});
+    cy.checkMachInvLabel({machRegName: 'machine-registration', labelName: 'myInvLabel1', labelValue: 'myInvLabelValue1'});
+  });
 });
