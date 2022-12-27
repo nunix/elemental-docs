@@ -31,27 +31,29 @@ const (
 	netDefaultFileName = "../assets/net-default.xml"
 	clusterYaml        = "../assets/cluster.yaml"
 	selectorYaml       = "../assets/selector.yaml"
-	registrationYaml   = "../assets/machineregistration.yaml"
+	registrationYaml   = "../assets/machineRegistration.yaml"
 	emulatedTPMYaml    = "../assets/emulated_tpm.yaml"
 )
 
 var (
-	arch            string
-	clusterName     string
-	clusterNS       string
-	emulateTPM      string
-	imageVersion    string
-	isoBoot         string
-	k8sVersion      string
-	caType          string
-	testType        string
-	osImage         string
-	rancherChannel  string
-	rancherVersion  string
-	upgradeType     string
-	upgradeOperator string
-	vmIndex         int
-	vmName          string
+	arch                string
+	caType              string
+	clusterName         string
+	clusterNS           string
+	elementalSupport    string
+	emulateTPM          string
+	imageVersion        string
+	isoBoot             string
+	k8sVersion          string
+	osImage             string
+	rancherChannel      string
+	rancherLogCollector string
+	rancherVersion      string
+	testType            string
+	upgradeType         string
+	upgradeOperator     string
+	vmIndex             int
+	vmName              string
 )
 
 func FailWithReport(message string, callerSkip ...int) {
@@ -66,18 +68,20 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	arch = os.Getenv("ARCH")
+	caType = os.Getenv("CA_TYPE")
 	clusterName = os.Getenv("CLUSTER_NAME")
 	clusterNS = os.Getenv("CLUSTER_NS")
+	elementalSupport = os.Getenv("ELEMENTAL_SUPPORT")
 	emulateTPM = os.Getenv("EMULATE_TPM")
 	imageVersion = os.Getenv("IMAGE_VERSION")
 	index := os.Getenv("VM_INDEX")
 	isoBoot = os.Getenv("ISO_BOOT")
 	k8sVersion = os.Getenv("K8S_VERSION_TO_PROVISION")
-	caType = os.Getenv("CA_TYPE")
-	testType = os.Getenv("TEST_TYPE")
 	osImage = os.Getenv("CONTAINER_IMAGE")
 	rancherChannel = os.Getenv("RANCHER_CHANNEL")
+	rancherLogCollector = os.Getenv("RANCHER_LOG_COLLECTOR")
 	rancherVersion = os.Getenv("RANCHER_VERSION")
+	testType = os.Getenv("TEST_TYPE")
 	upgradeType = os.Getenv("UPGRADE_TYPE")
 	upgradeOperator = os.Getenv("UPGRADE_OPERATOR")
 

@@ -8,14 +8,28 @@ on:
       credentials:
         description: Credentials to use to connect
         required: true
+      pat_token:
+        description: PAT token used to add runner
+        required: true
+      slack_webhook_url:
+        description: WebHook URL to use for Slack
+        required: true
     inputs:
-      ui_account:
-        description: Account used to test RBAC role in UI
-        required: false
+      ca_type:
+        description: CA type to use (selfsigned or private)
+        default: selfsigned
         type: string
       cluster_name:
         description: Name of the provisioned cluster
         required: true
+        type: string
+      destroy_runner:
+        description: Destroy the auto-generated self-hosted runner
+        default: true
+        type: boolean
+      elemental_support:
+        description: URL of the elemental support binary
+        default: https://github.com/rancher/elemental-operator/releases/download/v1.0.0/elemental-support_1.0.0_linux_amd64
         type: string
       iso_to_test:
         description: ISO to test (default built one is empty)
@@ -23,10 +37,6 @@ on:
       k8s_version_to_provision:
         description: Name and version of installed K8s distribution
         required: true
-        type: string
-      ca_type:
-        description: CA type to use (selfsigned or private)
-        default: selfsigned
         type: string
       node_number:
         description: Number of nodes to deploy on the provisioned cluster
@@ -36,13 +46,17 @@ on:
         description: Rancher Manager channel to use for installation (alpha/latest/stable)
         default: stable
         type: string
+      rancher_log_collector:
+        description: URL of the Rancher log collector script
+        default: https://raw.githubusercontent.com/rancherlabs/support-tools/master/collection/rancher/v2.x/logs-collector/rancher2_logs_collector.sh
+        type: string
       rancher_version:
         description: Rancher Manager version to use for installation (fixed version or latest)
         default: latest
         type: string
-      runner:
-        description: Runner on which to execute tests
-        required: true
+      runner_template:
+        description: Runner template to use
+        default: elemental-e2e-ci-runner-spot-x86-64-template-n2-standard-8-v2
         type: string
       start_condition:
         description: Start condition of the runner
@@ -52,37 +66,57 @@ on:
         description: Type of test to run (cli or ui)
         default: cli
         type: string
+      ui_account:
+        description: Account used to test RBAC role in UI
+        required: false
+        type: string
       upgrade_operator:
         description: URL to elemental-operator version to upgrade to
-        type: string
-      zone:
-        description: GCP zone to host the runner
-        default: us-central1-a
         type: string
       workflow_download:
         description: build-ci workflow to use for artifacts
         default: build-ci.yaml
         type: string
+      zone:
+        description: GCP zone to host the runner
+        default: us-central1-a
+        type: string
 
 jobs:
-  start-runner:
-    if: ${{ inputs.start_condition == 'success' }}
+  create-runner:
+    if: inputs.start_condition == 'success'
     runs-on: ubuntu-latest
+    outputs:
+      uuid: ${{ steps.generator.outputs.uuid }}
+      runner: ${{ steps.generator.outputs.runner }}
     steps:
       # actions/checkout MUST come before auth
       - name: Checkout
         uses: actions/checkout@v3
+      - name: Generate UUID and Runner hostname
+        id: generator
+        run: |
+          UUID=$(uuidgen)
+          echo "uuid=${UUID}" >> ${GITHUB_OUTPUT}
+          echo "runner=elemental-ci-${UUID}" >> ${GITHUB_OUTPUT}
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@v0
+        uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.credentials }}
       - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v0
-      - name: Start runner
-        run: gcloud compute instances start --zone ${{ inputs.zone }} ${{ inputs.runner }}
+        uses: google-github-actions/setup-gcloud@v1
+      - name: Create runner
+        run: |
+          gcloud compute instances create ${{ steps.generator.outputs.runner }} \
+            --source-instance-template ${{ inputs.runner_template }} \
+            --zone ${{ inputs.zone }}
+      - name: Create PAT token secret
+        run: |
+          echo -n ${{ secrets.pat_token }} \
+            | gcloud secrets create PAT_TOKEN_${{ steps.generator.outputs.uuid }} --data-file=-
   e2e:
-    needs: start-runner
-    runs-on: ${{ inputs.runner }}
+    needs: create-runner
+    runs-on: ${{ needs.create-runner.outputs.uuid }}
     env:
       TIMEOUT_SCALE: 2
       ARCH: amd64
@@ -108,43 +142,38 @@ jobs:
         uses: actions/setup-go@v3
         with:
           go-version: '~1.18'
-      - name: Download default ISO
+      - name: Cache ISO
         # NOTE: download the *default* ISO, not the one passed as a parameter
-        if: ${{ inputs.iso_to_test == '' }}
-        uses: dawidd6/action-download-artifact@v2.24.0
+        if: inputs.iso_to_test == ''
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-artifacts
         with:
-          workflow: ${{ inputs.workflow_download }}
-          workflow_conclusion: success
-          name: iso-image
-          # Force the path, this is a security hint!
-          path: ./
+          path: build/*
+          key: build-ci-${{ github.event.pull_request.head.sha || github.sha }}
+          # Alternate key, mainly useful for UI test
+          restore-keys: |
+            build-ci-
       - name: Download specified ISO
-        if: ${{ inputs.iso_to_test != '' }}
+        if: inputs.iso_to_test != ''
         env:
           ISO_TO_TEST: ${{ inputs.iso_to_test }}
           TAG: from-obs
         run: |
-          wget -v -L -c ${ISO_TO_TEST} -O elemental-${TAG}.iso
+          mkdir -p build
+          wget -v -L -c ${ISO_TO_TEST} -O build/elemental-${TAG}.iso
       - name: Extract iPXE artifacts from ISO
         run: |
           # Extract TAG
-          ISO=$(ls elemental-*.iso 2>/dev/null)
+          ISO=$(ls build/elemental-*.iso 2>/dev/null)
           TAG=${ISO#*-}
           export TAG=${TAG%.iso}
-          # Move ISO to build for next step
-          mkdir -p build
-          mv -f ${ISO} build/
           # Extract iPXE artifacts
           make extract_kernel_init_squash
           make ipxe
           mv -f build/* .
           # Looks a little bit weird but we have to keep the ISO in build!
           mv -f elemental-*.iso build/
-      - name: Clean local Helm repositories
-        run: |
-          # Clean Helm repo
-          HELM_REPO=$(helm repo list 2>/dev/null | awk '(NR>1) { print $1 }')
-          [[ -n "${HELM_REPO}" ]] && helm repo remove ${HELM_REPO} || true
       - name: Install Rancher
         id: installation
         env:
@@ -156,7 +185,7 @@ jobs:
           cd tests && HOSTNAME=$(hostname -f) make e2e-install-rancher
       - name: Cypress tests - Basics
         # Basics means tests without an extra elemental node needed
-        if: ${{ inputs.test_type == 'ui' }}
+        if: inputs.test_type == 'ui'
         env:
           UI_ACCOUNT: ${{ inputs.ui_account }}
           BROWSER: chrome
@@ -190,13 +219,13 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
       - name: Deploy a node to join Rancher manager
-        if: ${{ inputs.test_type == 'ui' }}
+        if: inputs.test_type == 'ui'
         env:
           VM_INDEX: 1
         run: cd tests && make e2e-ui-rancher
       - name: Cypress tests - Advanced
         # Advanced means tests which needs an extra elemental node (provisioned with libvirt)
-        if: ${{ inputs.test_type == 'ui' }}
+        if: inputs.test_type == 'ui'
         env:
           UI_ACCOUNT: ${{ inputs.ui_account }}
           BROWSER: firefox
@@ -207,8 +236,15 @@ jobs:
           SPEC: |
             cypress/e2e/unit_tests/machine_selector.spec.ts
             cypress/e2e/unit_tests/machine_inventory.spec.ts
+            cypress/e2e/unit_tests/deploy_app.spec.ts
             cypress/e2e/unit_tests/upgrade.spec.ts
-        run: make -f tests/Makefile start-cypress-tests
+        run: |
+          export OPERATOR_VERSION=$(kubectl get pods \
+                                      -n cattle-elemental-system \
+                                      -l app=elemental-operator \
+                                      -o jsonpath={.items[*].status.containerStatuses[*].image} \
+                                    | awk -F ':' '{print substr($2,0,3)}')
+          make -f tests/Makefile start-cypress-tests
       - name: Upload Cypress screenshots (Advanced)
         if: failure()
         uses: actions/upload-artifact@v3
@@ -227,49 +263,49 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
       - name: Configure Rancher & Libvirt
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         run: cd tests && make e2e-configure-rancher
       - name: Bootstrap node 1 with current build (use Emulated TPM and iPXE)
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           EMULATE_TPM: true
           VM_INDEX: 1
         run: cd tests && make e2e-bootstrap-node
       - name: Upgrade node 1 (with osImage method) to latest build
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           CONTAINER_IMAGE: quay.io/costoolkit/elemental-ci:latest
           UPGRADE_TYPE: osImage
           VM_INDEX: 1
         run: cd tests && make e2e-upgrade-node
       - name: Bootstrap node 2 with current build (use ISO)
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           ISO_BOOT: true
           VM_INDEX: 2
         run: cd tests && make e2e-bootstrap-node
       - name: Bootstrap node 3 with current build (use ISO)
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           ISO_BOOT: true
           VM_INDEX: 3
         run: cd tests && make e2e-bootstrap-node
       - name: Upgrade node 2 (with manual method) to latest build
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           CONTAINER_IMAGE: quay.io/costoolkit/elemental-ci:latest
           UPGRADE_TYPE: manual
           VM_INDEX: 2
         run: cd tests && make e2e-upgrade-node
       - name: Upgrade node 3 (with managedOSVersionName method) to specified Teal version
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           IMAGE_VERSION: teal-5.3
           UPGRADE_TYPE: managedOSVersionName
           VM_INDEX: 3
         run: cd tests && make e2e-upgrade-node
       - name: Bootstrap additional nodes (total of ${{ inputs.node_number }}) with current build (use iPXE)
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         env:
           NODE_NUMBER: ${{ inputs.node_number }}
         run: |
@@ -279,36 +315,55 @@ jobs:
             VM_INDEX=${I} make e2e-bootstrap-node
           done
       - name: List installed nodes
-        if: ${{ inputs.test_type == 'cli' }}
+        if: inputs.test_type == 'cli'
         run: sudo virsh list
-      - name: Add summary
+      - name: Store logs
+        if: always()
+        env:
+          ELEMENTAL_SUPPORT: ${{ inputs.elemental_support }}
+          RANCHER_LOG_COLLECTOR: ${{ inputs.rancher_log_collector }}
         run: |
+          cd tests && make e2e-get-logs
+      - name: Upload cluster logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: support-logs
+          path: tests/**/logs/*
+          if-no-files-found: ignore
+      - name: Add summary
+        if: always()
+        run: |
+          # Extract Rancher Manager version
+          RM_VERSION=$(kubectl get pod \
+                         --namespace cattle-system \
+                         -l app=rancher \
+                         -o jsonpath={.items[*].status.containerStatuses[*].image} 2> /dev/null || true)
+          # Extract elemental-operator version
+          if ${{ env.UPGRADE_OPERATOR == '' }}; then
+            UPGRADE_OPERATOR_VALUE="N/A"
+          else
+            UPGRADE_OPERATOR_VALUE=${{ env.UPGRADE_OPERATOR }}
+          fi
+          OPERATOR_VERSION=$(kubectl get pod \
+                             --namespace cattle-elemental-system \
+                             -l app=elemental-operator \
+                             -o jsonpath={.items[*].status.containerStatuses[*].image} 2> /dev/null || true)
+          # Add summary
           echo "## General informations" >> $GITHUB_STEP_SUMMARY
           if ${{ inputs.test_type == 'cli' }}; then
             echo "Number of nodes in the cluster: ${{ inputs.node_number }}" >> $GITHUB_STEP_SUMMARY
           fi
           echo "Type of certificate for Rancher Manager: ${{ inputs.ca_type }}"  >> $GITHUB_STEP_SUMMARY
           echo "## Versions used" >> $GITHUB_STEP_SUMMARY
-          echo "Rancher Manager: ${{ env.RANCHER_CHANNEL }}/${{ env.RANCHER_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "Rancher Manager Channel: ${{ env.RANCHER_CHANNEL }}/${{ env.RANCHER_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "Rancher Manager Version: ${RM_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "Elemental Operator Upgrade: ${UPGRADE_OPERATOR_VALUE}" >> $GITHUB_STEP_SUMMARY
+          echo "Elemental Operator Version: ${OPERATOR_VERSION}" >> $GITHUB_STEP_SUMMARY
           echo "K3s on Rancher Manager: ${{ env.INSTALL_K3S_VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo "K3s/RKE2 version deployed on the cluster: ${{ inputs.k8s_version_to_provision }}" >> $GITHUB_STEP_SUMMARY
-      - name: Remove VMs and K3s/RancherManager from worker ♻
-        if: always()
-        run: |
-          # Remove all VMs
-          for I in $(sudo virsh list --all| awk '/node-/ { print $2 }'); do
-            for C in destroy undefine; do
-              [[ "${C}" == "undefine" ]] && OPT="--nvram" || unset OPT
-              sudo virsh ${C} ${OPT} ${I} >/dev/null 2>&1 || true
-            done
-          done
-          # Remove K3s and Rancher Manager
-          /usr/local/bin/k3s-uninstall.sh || true
-      - name: Remove remaining stuff from worker ♻
-        if: always()
-        uses: colpal/actions-clean@v1
       - name: Send failed status to slack
-        if: failure()
+        if: failure() && github.event_name == 'schedule'
         uses: slackapi/slack-github-action@v1.23.0
         with:
           payload: |
@@ -333,21 +388,27 @@ jobs:
               ]
             }
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-  stop-runner:
-    if: always()
-    needs: e2e
+  delete-runner:
+    if: always() && needs.create-runner.result == 'success' && inputs.destroy_runner == true
+    needs: [create-runner, e2e]
     runs-on: ubuntu-latest
     steps:
       # actions/checkout MUST come before auth
       - name: Checkout
         uses: actions/checkout@v3
       - name: Authenticate to GCP
-        uses: google-github-actions/auth@v0
+        uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.credentials }}
       - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v0
-      - name: Stop runner
-        run: gcloud compute instances stop --zone ${{ inputs.zone }} ${{ inputs.runner }}
+        uses: google-github-actions/setup-gcloud@v1
+      - name: Delete PAT token secret
+        run: |
+          gcloud --quiet secrets delete PAT_TOKEN_${{ needs.create-runner.outputs.uuid }}
+      - name: Delete runner
+        run: |
+          gcloud --quiet compute instances delete ${{ needs.create-runner.outputs.runner }} \
+            --delete-disks all \
+            --zone ${{ inputs.zone }}
