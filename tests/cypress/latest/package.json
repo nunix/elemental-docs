@@ -1,0 +1,41 @@
+{
+  "name": "elemental-ui-e2e",
+  "version": "1.0.0",
+  "description": "Cypress tests to test the Elemental UI",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "lint": "eslint --ext .js,.ts .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rancher/elemental.git"
+  },
+  "keywords": [],
+  "author": "Elemental team",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/rancher/elemental/issues"
+  },
+  "homepage": "https://github.com/rancher/elemental#readme",
+  "dependencies": {
+    "@rancher-ecp-qa/cypress-library": "1.0.11",
+    "cy-verify-downloads": "^0.1.8",
+    "cypress": "^13.7.3",
+    "cypress-dark": "^1.8.3",
+    "cypress-file-upload": "^5.0.8",
+    "cypress-plugin-tab": "^1.0.5",
+    "cypress-slow-down": "^1.3.1",
+    "cypress-qase-reporter": "1.4.1",
+    "dotenv": "^10.0.0",
+    "typescript": "^4.5.2"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^6.2.0",
+    "@typescript-eslint/parser": "^6.2.0",
+    "eslint-plugin-cypress": "^2.13.0"
+  }
+}

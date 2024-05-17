@@ -1,5 +1,5 @@
 /*
-Copyright © 2022 SUSE LLC
+Copyright © 2022 - 2024 SUSE LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@ limitations under the License.
 package e2e_test
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -23,29 +24,28 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/rancher-sandbox/ele-testhelpers/kubectl"
 	"github.com/rancher-sandbox/ele-testhelpers/tools"
-	"github.com/rancher/elemental/tests/e2e/helpers/misc"
+	"github.com/rancher/elemental/tests/e2e/helpers/elemental"
+	"golang.org/x/mod/semver"
 )
 
 var _ = Describe("E2E - Configure test", Label("configure"), func() {
-	It("Configure Rancher and libvirt", func() {
-		type pattern struct {
-			key   string
-			value string
-		}
+	It("Deploy a new cluster", func() {
+		// Report to Qase
+		testCaseID = 30
 
 		// Patterns to replace
-		basePatterns := []pattern{
+		basePatterns := []YamlPattern{
 			{
 				key:   "%CLUSTER_NAME%",
 				value: clusterName,
 			},
 			{
 				key:   "%K8S_VERSION%",
-				value: k8sVersion,
+				value: k8sDownstreamVersion,
 			},
 		}
 
-		By("Creating a new cluster", func() {
+		By("Creating a cluster", func() {
 			// Create Yaml file
 			for _, p := range basePatterns {
 				err := tools.Sed(p.key, p.value, clusterYaml)
@@ -57,19 +57,18 @@ var _ = Describe("E2E - Configure test", Label("configure"), func() {
 			Expect(err).To(Not(HaveOccurred()))
 
 			// Check that the cluster is correctly created
-			Eventually(func() string {
-				out, _ := kubectl.Run("get", "cluster",
-					"--namespace", clusterNS,
-					clusterName, "-o", "jsonpath={.metadata.name}")
-				return out
-			}, misc.SetTimeout(3*time.Minute), 5*time.Second).Should(Equal(clusterName))
+			CheckCreatedCluster(clusterNS, clusterName)
 		})
 
 		By("Creating cluster selectors", func() {
-			selectorTmp := "/tmp/selector.yaml"
+			// Set temporary file
+			selectorTmp, err := tools.CreateTemp("selector")
+			Expect(err).To(Not(HaveOccurred()))
+			defer os.Remove(selectorTmp)
+
 			for _, pool := range []string{"master", "worker"} {
 				// Patterns to replace
-				addPatterns := []pattern{
+				addPatterns := []YamlPattern{
 					{
 						key:   "%POOL_TYPE%",
 						value: pool,
@@ -78,7 +77,8 @@ var _ = Describe("E2E - Configure test", Label("configure"), func() {
 				patterns := append(basePatterns, addPatterns...)
 
 				// Save original file as it will have to be modified twice
-				misc.CopyFile(selectorYaml, selectorTmp)
+				err := tools.CopyFile(selectorYaml, selectorTmp)
+				Expect(err).To(Not(HaveOccurred()))
 
 				// Create Yaml file
 				for _, p := range patterns {
@@ -87,35 +87,23 @@ var _ = Describe("E2E - Configure test", Label("configure"), func() {
 				}
 
 				// Apply to k8s
-				err := kubectl.Apply(clusterNS, selectorTmp)
+				err = kubectl.Apply(clusterNS, selectorTmp)
 				Expect(err).To(Not(HaveOccurred()))
 
 				// Check that the selector template is correctly created
-				Eventually(func() string {
-					out, _ := kubectl.Run("get", "MachineInventorySelectorTemplate",
-						"--namespace", clusterNS,
-						"-o", "jsonpath={.items[*].metadata.name}")
-					return out
-				}, misc.SetTimeout(3*time.Minute), 5*time.Second).Should(ContainSubstring("selector-" + pool + "-" + clusterName))
-
-				// Check that the selector for master is correctly created
-				// NOTE: the worker one is not created yet because 'quantity' is set to 0 for this one
-				if pool == "master" {
-					Eventually(func() string {
-						out, _ := kubectl.Run("get", "MachineInventorySelector",
-							"--namespace", clusterNS,
-							"-o", "jsonpath={.items[*].metadata.name}")
-						return out
-					}, misc.SetTimeout(3*time.Minute), 5*time.Second).Should(ContainSubstring("selector-" + pool + "-" + clusterName))
-				}
+				CheckCreatedSelectorTemplate(clusterNS, "selector-"+pool+"-"+clusterName)
 			}
 		})
 
 		By("Adding MachineRegistration", func() {
-			registrationTmp := "/tmp/registration.yaml"
+			// Set temporary file
+			registrationTmp, err := tools.CreateTemp("machineRegistration")
+			Expect(err).To(Not(HaveOccurred()))
+			defer os.Remove(registrationTmp)
+
 			for _, pool := range []string{"master", "worker"} {
 				// Patterns to replace
-				addPatterns := []pattern{
+				addPatterns := []YamlPattern{
 					{
 						key:   "%PASSWORD%",
 						value: userPassword,
@@ -123,6 +111,10 @@ var _ = Describe("E2E - Configure test", Label("configure"), func() {
 					{
 						key:   "%POOL_TYPE%",
 						value: pool,
+					},
+					{
+						key:   "%SNAP_TYPE%",
+						value: snapType,
 					},
 					{
 						key:   "%USER%",
@@ -136,7 +128,8 @@ var _ = Describe("E2E - Configure test", Label("configure"), func() {
 				patterns := append(basePatterns, addPatterns...)
 
 				// Save original file as it will have to be modified twice
-				misc.CopyFile(registrationYaml, registrationTmp)
+				err := tools.CopyFile(registrationYaml, registrationTmp)
+				Expect(err).To(Not(HaveOccurred()))
 
 				// Create Yaml file
 				for _, p := range patterns {
@@ -144,49 +137,41 @@ var _ = Describe("E2E - Configure test", Label("configure"), func() {
 					Expect(err).To(Not(HaveOccurred()))
 				}
 
+				// Stable version of Elemental Operator does not support snapshotter option
+				// NOTE: a bit dirty, but this is a workaround until Dev become the new Stable
+				operatorVersion, err := elemental.GetOperatorVersion()
+				if semver.Compare("v"+operatorVersion, "v1.6.0") == -1 {
+					GinkgoWriter.Printf("Found operator Stable version, apply workaround for pool %s.\n", pool)
+					err = exec.Command("sed", "-i", "/snapshotter:/,/type:/d", registrationTmp).Run()
+					Expect(err).To(Not(HaveOccurred()))
+				}
+
 				// Apply to k8s
-				err := kubectl.Apply(clusterNS, registrationTmp)
+				err = kubectl.Apply(clusterNS, registrationTmp)
 				Expect(err).To(Not(HaveOccurred()))
 
 				// Check that the machine registration is correctly created
-				Eventually(func() string {
-					out, _ := kubectl.Run("get", "MachineRegistration",
-						"--namespace", clusterNS,
-						"-o", "jsonpath={.items[*].metadata.name}")
-					return out
-				}, misc.SetTimeout(3*time.Minute), 5*time.Second).Should(ContainSubstring("machine-registration-" + pool + "-" + clusterName))
+				CheckCreatedRegistration(clusterNS, "machine-registration-"+pool+"-"+clusterName)
 			}
 		})
+	})
 
-		// Only for K3s cluster
-		if strings.Contains(k8sVersion, "k3s") {
-			By("Setting controlPlane role for worker pool", func() {
-				// Wait a little before toggling the role
-				time.Sleep(misc.SetTimeout(1 * time.Minute))
+	It("Configure Libvirt (if needed)", func() {
+		if !strings.Contains(testType, "airgap") {
+			// Report to Qase
+			testCaseID = 68
 
-				err := misc.ToggleRole(clusterNS, clusterName, "pool-worker-"+clusterName, "ControlPlaneRole", true)
+			By("Starting default network", func() {
+				// Don't check return code, as the default network could be already removed
+				for _, c := range []string{"net-destroy", "net-undefine"} {
+					_ = exec.Command("sudo", "virsh", c, "default").Run()
+				}
+
+				// Wait a bit between virsh commands
+				time.Sleep(30 * time.Second)
+				err := exec.Command("sudo", "virsh", "net-create", netDefaultFileName).Run()
 				Expect(err).To(Not(HaveOccurred()))
 			})
 		}
-
-		By("Starting HTTP server for network installation", func() {
-			// TODO: improve it to run in background!
-			// err := tools.HTTPShare("../..", 8000)
-			// Expect(err).To(Not(HaveOccurred()))
-
-			// Use Python for now...
-			err := exec.Command("../scripts/start-httpd").Run()
-			Expect(err).To(Not(HaveOccurred()))
-		})
-
-		By("Starting default network", func() {
-			// Don't check return code, as the default network could be already removed
-			for _, c := range []string{"net-destroy", "net-undefine"} {
-				_ = exec.Command("sudo", "virsh", c, "default").Run()
-			}
-
-			err := exec.Command("sudo", "virsh", "net-create", netDefaultFileName).Run()
-			Expect(err).To(Not(HaveOccurred()))
-		})
 	})
 })

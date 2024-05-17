@@ -1,7 +1,7 @@
 #
 # spec file for package elemental
 #
-# Copyright (c) 2022 SUSE LLC
+# Copyright (c) 2022 - 2024 SUSE LLC
 #
 # All modifications and additions to the file contributed by third parties
 # remain the property of their copyright owners, unless otherwise agreed
@@ -24,12 +24,14 @@ Release:        0
 Summary:        A Rancher and Kubernetes optimized immutable Linux distribution
 License:        Apache-2.0
 Group:          System/Management
-URL:            https://github.com/rancher-sandbox/%{name}
+URL:            https://github.com/rancher/%{name}
 Source:         %{name}-%{version}.tar
 Source1:        LICENSE
 Source2:        README.md
+Source3:        %{name}-rpmlintrc
 
-Requires:       elemental-toolkit
+Requires:       elemental-toolkit >= 2.1.0
+Requires:       elemental-toolkit < 2.2.0
 Requires:       elemental-register
 Requires:       elemental-system-agent
 Requires:       elemental-support
@@ -65,43 +67,99 @@ cp -a framework/files/* %{buildroot}
 
 rm -rf %{buildroot}/var/log/journal
 
-# remove luet config in Elemental Teal
-rm -rf %{buildroot}/etc/luet 
-
-# belongs to elemental-system-agent package
-rm %{buildroot}%{_unitdir}/elemental-system-agent.service
-
-# remove placeholders
-rm -rf %{buildroot}/usr/libexec/.placeholder
-
 %pre
+%if 0%{?suse_version}
 %service_add_pre elemental-populate-node-labels.service
+%service_add_pre shutdown-containerd.service
+%service_add_pre elemental-register.service
+%service_add_pre elemental-register-install.service
+%service_add_pre elemental-register-reset.service
+%service_add_pre elemental-register.timer
+%service_add_pre elemental-system-agent.service
+%endif
 
 %post
+%if 0%{?suse_version}
 %service_add_post elemental-populate-node-labels.service
+%service_add_post shutdown-containerd.service
+%service_add_post elemental-register.service
+%service_add_post elemental-register-install.service
+%service_add_post elemental-register-reset.service
+%service_add_post elemental-register.timer
+%service_add_post elemental-system-agent.service
+%else
+%systemd_post elemental-populate-node-labels.service
+%systemd_post shutdown-containerd.service
+%systemd_post elemental-register.service
+%systemd_post elemental-register-install.service
+%systemd_post elemental-register-reset.service
+%systemd_post elemental-register.timer
+%systemd_post elemental-system-agent.service
+%endif
 
 %preun
+%if 0%{?suse_version}
 %service_del_preun elemental-populate-node-labels.service
+%service_del_preun shutdown-containerd.service
+%service_del_preun elemental-register.service
+%service_del_preun elemental-register-install.service
+%service_del_preun elemental-register-reset.service
+%service_del_preun elemental-register.timer
+%service_del_preun elemental-system-agent.service
+%else
+%systemd_preun elemental-populate-node-labels.service
+%systemd_preun shutdown-containerd.service
+%systemd_preun elemental-register.service
+%systemd_preun elemental-register-install.service
+%systemd_preun elemental-register-reset.service
+%systemd_preun elemental-register.timer
+%systemd_preun elemental-system-agent.service
+%endif
 
 %postun
+%if 0%{?suse_version}
 %service_del_postun elemental-populate-node-labels.service
+%service_del_postun shutdown-containerd.service
+%service_del_postun elemental-register.service
+%service_del_postun elemental-register-install.service
+%service_del_postun elemental-register-reset.service
+%service_del_postun elemental-register.timer
+%service_del_postun elemental-system-agent.service
+%else
+%systemd_postun elemental-populate-node-labels.service
+%systemd_postun shutdown-containerd.service
+%systemd_postun elemental-register.service
+%systemd_postun elemental-register-install.service
+%systemd_postun elemental-register-reset.service
+%systemd_postun elemental-register.timer
+%systemd_postun elemental-system-agent.service
+%endif
 
 %files
 %defattr(-,root,root,-)
 %doc README.md
 %license LICENSE
-%dir %{_sysconfdir}/cos
-%config %{_sysconfdir}/cos/bootargs.cfg
+%dir %{_sysconfdir}/elemental
+%config %{_sysconfdir}/elemental/bootargs.cfg
+%dir %{_sysconfdir}/elemental/config.d
+%config %{_sysconfdir}/elemental/config.d/*
 %dir %{_sysconfdir}/dracut.conf.d
 %config %{_sysconfdir}/dracut.conf.d/51-certificates-initrd.conf
-%config %{_sysconfdir}/dracut.conf.d/99-teal-systemd.conf
+%config %{_sysconfdir}/dracut.conf.d/99-elemental-systemd.conf
 %dir %{_sysconfdir}/NetworkManager
 %dir %{_sysconfdir}/NetworkManager/conf.d
 %config %{_sysconfdir}/NetworkManager/conf.d/rke2-canal.conf
 %dir %{_unitdir}
+%{_unitdir}/shutdown-containerd.service
+%{_unitdir}/elemental-register.service
+%{_unitdir}/elemental-register-install.service
+%{_unitdir}/elemental-register-reset.service
+%{_unitdir}/elemental-register.timer
 %{_unitdir}/elemental-populate-node-labels.service
+%{_unitdir}/elemental-system-agent.service
 %{_sbindir}/elemental-populate-node-labels
-%dir /usr/libexec
+%dir %{_libexecdir}/elemental-checker
+%{_libexecdir}/elemental-checker/elemental-register.sh
 %dir %{systemdir}
 %dir %{oemdir}
 %{oemdir}/*

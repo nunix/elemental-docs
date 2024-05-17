@@ -1,69 +1,110 @@
-# Used by integration tests
-export COS_USER?=root
-export COS_PASS?=ros
+ROOT_DIR:=$(realpath $(PWD)/..)
+IPXE:=$(ROOT_DIR)/install.ipxe
+ISO:=$(shell file -Ls $(ROOT_DIR)/*.iso 2>/dev/null | awk -F':' '/boot sector/ { print $$1 }')
 
-export COS_HOST?=192.168.122.50:22
-export COS_TIMEOUT?=360
+# Define Ginkgo timeout for the tests
+GINKGO_TIMEOUT?=3600
+ifdef VM_NUMBERS
+	ifeq ($(shell expr $(VM_NUMBERS) \> 50), 1)
+		GINKGO_TIMEOUT=7200
+	endif
+endif
+ifeq ($(TEST_TYPE),multi)
+	GINKGO_TIMEOUT=10800
+endif
 
-BOX_IMAGE?=elemental
-BOX?=
-ISO?=
-ROOT_DIR:=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+extract_kernel_init_squash:
+	@./scripts/get-boot-files-for-pxe $(ISO)
 
-export CLOUD_INIT_ISO?=$(ROOT_DIR)/build/ci.iso
-
-clean:
-	VBoxManage controlvm "test" poweroff &>/dev/null || true
-	VBoxManage unregistervm "test" --delete &>/dev/null || true
-	VBoxManage closemedium disk sda.vdi --delete &>/dev/null || true
-	rm -rf build-box build || true
+ipxe:
+	@VAR=$(notdir $(ISO)); \
+	echo "#!ipxe" > $(IPXE); \
+	echo "set arch amd64" >> $(IPXE); \
+	echo "set url tftp://10.0.2.2/$${VAR##*/}" >> $(IPXE); \
+	echo "set kernel $${VAR/\.iso/-linux}" >> $(IPXE); \
+	echo "set initrd $${VAR/\.iso/-initrd}" >> $(IPXE); \
+	echo "set rootfs $${VAR/\.iso/-squashfs}" >> $(IPXE); \
+	echo "# set config http://example.com/machine-config" >> $(IPXE); \
+	echo "# set cmdline cos.setup=/run/initramfs/live/cloud-config extra.values=1" >> $(IPXE); \
+	echo "initrd \$${url}/\$${initrd}" >> $(IPXE); \
+	echo "chain --autofree --replace \$${url}/\$${kernel} initrd=\$${initrd} ip=dhcp rd.cos.disable root=live:\$${url}/\$${rootfs} stages.initramfs[0].commands[0]=\"curl -k \$${config} > /run/initramfs/live/livecd-cloud-config.yaml\" console=tty1 console=ttyS0 \$${cmdline}" >> $(IPXE)
 
 deps: 
-	go install -mod=mod github.com/onsi/ginkgo/v2/ginkgo
-	go install -mod=mod github.com/onsi/gomega
-	go mod tidy
+	@go install -mod=mod github.com/onsi/ginkgo/v2/ginkgo
+	@go install -mod=mod github.com/onsi/gomega
+	@go mod tidy
 
-# Targets to run tests on VBox (GHA macOS runners)
-build-box/sda.vdi:
-	mkdir build-box
-	VBoxManage createmedium disk --filename build-box/sda.vdi --size 40000
+# Generate tests description file
+generate-readme:
+	@./scripts/generate-readme > README.md
 
-# Test installation from ISO image
-iso-tests: build-box/sda.vdi deps
-	VBoxManage createvm --name "test" --register
-	VBoxManage modifyvm "test" --firmware efi --memory 10240 --cpus 3
-	VBoxManage modifyvm "test" --nic1 nat --boot1 disk --boot2 dvd --natpf1 "guestssh,tcp,,2222,,22"
-	VBoxManage storagectl "test" --name "sata controller" --add sata --portcount 2 --hostiocache off
-	VBoxManage storageattach "test" --storagectl "sata controller" --port 0 --device 0 --type hdd --medium build-box/sda.vdi
-	VBoxManage storageattach "test" --storagectl "sata controller" --port 1 --device 0 --type dvddrive --medium $(ISO)
-	VBoxManage startvm "test" --type headless
-	ginkgo --label-filter iso -r -v ./install
-	ginkgo -r -v ./smoke
+# Qase commands
+create-qase-run: deps
+	@go run qase/qase_cmd.go -create
 
-# Test installation from container image
-container-tests: build-box/sda.vdi deps
-	VBoxManage createvm --name "test" --register
-	VBoxManage modifyvm "test" --firmware efi --memory 10240 --cpus 3
-	VBoxManage modifyvm "test" --nic1 nat --boot1 disk --boot2 dvd --natpf1 "guestssh,tcp,,2222,,22"
-	VBoxManage storagectl "test" --name "sata controller" --add sata --portcount 2 --hostiocache off
-	VBoxManage storageattach "test" --storagectl "sata controller" --port 0 --device 0 --type hdd --medium build-box/sda.vdi
-	VBoxManage storageattach "test" --storagectl "sata controller" --port 1 --device 0 --type dvddrive --medium $(ISO)
-	VBoxManage startvm "test" --type headless
-	ginkgo --label-filter container -r -v ./install
-	ginkgo -r -v ./smoke
+delete-qase-run: deps
+	@go run qase/qase_cmd.go -delete
+
+publish-qase-run: deps
+	@go run qase/qase_cmd.go -publish
 
 # E2E tests
-e2e-install-rancher: deps
-	ginkgo --label-filter install -r -v ./e2e
+e2e-airgap-rancher: deps
+	ginkgo --label-filter airgap-rancher -r -v ./e2e
+
+e2e-bootstrap-node: deps
+	ginkgo --timeout $(GINKGO_TIMEOUT)s --label-filter bootstrap -r -v ./e2e
+
+e2e-backup-restore: deps
+	ginkgo --label-filter test-backup-restore -r -v ./e2e
+
+e2e-check-app: deps
+	ginkgo --label-filter check-app -r -v ./e2e
+
 e2e-configure-rancher: deps
 	ginkgo --label-filter configure -r -v ./e2e
-e2e-ui-rancher: deps
-	ginkgo --label-filter ui -r -v ./e2e
-e2e-bootstrap-node: deps
-	ginkgo --label-filter bootstrap -r -v ./e2e
-e2e-upgrade-node: deps
-	ginkgo --label-filter upgrade -r -v ./e2e
-start-cypress-tests:
-	@./tests/scripts/start_cypress_tests.sh
+
 e2e-get-logs: deps
 	ginkgo --label-filter logs -r -v ./e2e
+
+e2e-install-app: deps
+	ginkgo --label-filter install-app -r -v ./e2e
+
+e2e-install-backup-restore: deps
+	ginkgo --label-filter install-backup-restore -r -v ./e2e
+
+e2e-install-chartmuseum:
+	sudo ./scripts/deploy-chartmuseum $(OPERATOR_REPO)
+
+e2e-install-rancher: deps
+	ginkgo --label-filter install -r -v ./e2e
+
+e2e-iso-image: deps
+	ginkgo --label-filter iso-image -r -v ./e2e
+
+e2e-multi-cluster: deps
+	ginkgo --timeout $(GINKGO_TIMEOUT)s --label-filter multi-cluster -r -v ./e2e
+
+e2e-reset: deps
+	ginkgo --label-filter reset -r -v ./e2e
+
+e2e-prepare-archive: deps
+	ginkgo --label-filter prepare-archive -r -v ./e2e
+	
+e2e-ui-rancher: deps
+	ginkgo --label-filter ui -r -v ./e2e
+
+e2e-uninstall-operator:
+	ginkgo --label-filter uninstall-operator -r -v ./e2e
+
+e2e-upgrade-node: deps
+	ginkgo --label-filter upgrade-node -r -v ./e2e
+
+e2e-upgrade-operator: deps
+	ginkgo --label-filter upgrade-operator -r -v ./e2e
+
+e2e-upgrade-rancher-manager: deps
+	ginkgo --label-filter upgrade-rancher-manager -r -v ./e2e
+
+start-cypress-tests:
+	@./scripts/start-cypress-tests

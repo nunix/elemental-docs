@@ -1,5 +1,5 @@
 /*
-Copyright © 2022 SUSE LLC
+Copyright © 2022 - 2024 SUSE LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,42 +17,36 @@ package e2e_test
 import (
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/rancher-sandbox/ele-testhelpers/kubectl"
+	"github.com/rancher-sandbox/ele-testhelpers/rancher"
 	"github.com/rancher-sandbox/ele-testhelpers/tools"
+	"github.com/rancher/elemental/tests/e2e/helpers/elemental"
 	"github.com/rancher/elemental/tests/e2e/helpers/misc"
+	"github.com/rancher/elemental/tests/e2e/helpers/network"
 )
 
 var _ = Describe("E2E - Bootstrap node for UI", Label("ui"), func() {
 	var (
-		macAdrs string
-		client  *tools.Client
+		bootstrappedNodes int
+		wg                sync.WaitGroup
 	)
 
 	It("Configure libvirt and bootstrap a node", func() {
 		By("Downloading MachineRegistration", func() {
-			tokenURL, err := kubectl.Run("get", "MachineRegistration",
+			tokenURL, err := kubectl.RunWithoutErr("get", "MachineRegistration",
 				"--namespace", clusterNS,
 				"machine-registration", "-o", "jsonpath={.status.registrationURL}")
 			Expect(err).To(Not(HaveOccurred()))
 
 			// Get the YAML config file
-			fileName := "../../install-config.yaml"
-			err = tools.GetFileFromURL(tokenURL, fileName, false)
-			Expect(err).To(Not(HaveOccurred()))
-		})
-
-		By("Starting HTTP server for network installation", func() {
-			// TODO: improve it to run in background!
-			// err := tools.HTTPShare("../..", 8000)
-			// Expect(err).To(Not(HaveOccurred()))
-
-			// Use Python for now...
-			err := exec.Command("../scripts/start-httpd").Run()
-			Expect(err).To(Not(HaveOccurred()))
+			Eventually(func() error {
+				return tools.GetFileFromURL(tokenURL, installConfigYaml, false)
+			}, tools.SetTimeout(2*time.Minute), 10*time.Second).ShouldNot(HaveOccurred())
 		})
 
 		By("Starting default network", func() {
@@ -66,61 +60,138 @@ var _ = Describe("E2E - Bootstrap node for UI", Label("ui"), func() {
 			Expect(err).To(Not(HaveOccurred()))
 		})
 
-		By("Configuring iPXE boot script for network installation", func() {
-			numberOfFile, err := misc.ConfigureiPXE()
-			Expect(err).To(Not(HaveOccurred()))
-			Expect(numberOfFile).To(BeNumerically(">=", 1))
-		})
-
-		By("Adding VM in default network", func() {
-			// Add node in network configuration if needed
-			if macAdrs == "" {
-				err := misc.AddNode(vmName, vmIndex, netDefaultFileName)
+		if !isoBoot && !rawBoot {
+			By("Configuring iPXE boot script for network installation", func() {
+				numberOfFile, err := network.ConfigureiPXE(httpSrv)
 				Expect(err).To(Not(HaveOccurred()))
-			}
+				Expect(numberOfFile).To(BeNumerically(">=", 1))
+			})
+		}
 
-			hostData, err := tools.GetHostNetConfig(".*name=\""+vmName+"\".*", netDefaultFileName)
+		// Loop on node provisionning
+		// NOTE: if numberOfVMs == vmIndex then only one node will be provisionned
+		bootstrappedNodes = 0
+		for index := vmIndex; index <= numberOfVMs; index++ {
+			// Set node hostname
+			hostName := elemental.SetHostname(vmNameRoot, index)
+			Expect(hostName).To(Not(BeEmpty()))
+
+			// Add node in network configuration
+			err := rancher.AddNode(netDefaultFileName, hostName, index)
 			Expect(err).To(Not(HaveOccurred()))
 
-			client = &tools.Client{
-				Host:     string(hostData.IP) + ":22",
-				Username: userName,
-				Password: userPassword,
-			}
+			// Get generated MAC address
+			client, macAdrs := GetNodeInfo(hostName)
+			Expect(client).To(Not(BeNil()))
+			Expect(macAdrs).To(Not(BeEmpty()))
 
-			macAdrs = hostData.Mac
-		})
+			wg.Add(1)
+			go func(s, h, m string, i int, cl *tools.Client) {
+				defer wg.Done()
+				defer GinkgoRecover()
 
-		By("Creating and installing VM", func() {
-			// Install VM
-			cmd := exec.Command("../scripts/install-vm", vmName, macAdrs)
-			out, err := cmd.CombinedOutput()
-			GinkgoWriter.Printf("%s\n", out)
-			Expect(err).To(Not(HaveOccurred()))
-		})
+				By("Installing node "+h, func() {
+					// Execute node deployment in parallel
+					err := exec.Command(s, h, m).Run()
+					Expect(err).To(Not(HaveOccurred()))
 
-		By("Checking that the VM is available in Rancher", func() {
-			id, err := misc.GetServerId(clusterNS, vmIndex)
-			Expect(err).To(Not(HaveOccurred()))
-			Expect(id).To(Not(BeEmpty()))
-		})
+					if rawBoot {
+						// Report to Qase that we boot from raw image
+						testCaseID = 75
 
-		By("Restarting the VM to add it in the cluster", func() {
-			err := exec.Command("sudo", "virsh", "start", vmName).Run()
-			Expect(err).To(Not(HaveOccurred()))
-		})
+						// The VM will boot first on the recovery partition to create the normal partition
+						// No need to check the recovery process
+						// Only make sure the VM is up and running on the normal partition
+						GinkgoWriter.Printf("Checking ssh on VM %s\n", h)
+						CheckSSH(cl)
+						GinkgoWriter.Printf("Checking ssh OK on VM %s\n", h)
 
-		By("Checking VM connection", func() {
-			id, err := misc.GetServerId(clusterNS, vmIndex)
-			Expect(err).To(Not(HaveOccurred()))
-			Expect(id).To(Not(BeEmpty()))
+						// Wait for the end of the elemental-register process
+						Eventually(func() error {
+							_, err := cl.RunSSH("(journalctl --no-pager -u elemental-register.service) | grep -Eiq 'Finished Elemental Register'")
+							return err
+						}, tools.SetTimeout(4*time.Minute), 10*time.Second).Should(Not(HaveOccurred()))
 
-			// Retry the SSH connection, as it can takes time for the user to be created
-			Eventually(func() string {
-				out, _ := client.RunSSH("uname -n")
-				out = strings.Trim(out, "\n")
-				return out
-			}, misc.SetTimeout(2*time.Minute), 5*time.Second)
-		})
+						// Wait a bit more to be sure the VM is ready and halt it
+						time.Sleep(1 * time.Minute)
+						GinkgoWriter.Printf("Stopping VM %s\n", h)
+						err := exec.Command("sudo", "virsh", "destroy", h).Run()
+						Expect(err).To(Not(HaveOccurred()))
+
+						// Make sure VM status is equal to shut-off
+						Eventually(func() string {
+							out, _ := exec.Command("sudo", "virsh", "domstate", h).Output()
+							return strings.Trim(string(out), "\n\n")
+						}, tools.SetTimeout(5*time.Minute), 5*time.Second).Should(Equal("shut off"))
+					} else {
+						// Report to Qase that we boot from ISO
+						testCaseID = 9
+					}
+
+				})
+			}(installVMScript, hostName, macAdrs, index, client)
+
+			// Wait a bit before starting more nodes to reduce CPU and I/O load
+			bootstrappedNodes = misc.WaitNodesBoot(index, vmIndex, bootstrappedNodes, numberOfNodesMax)
+		}
+
+		// Wait for all parallel jobs
+		wg.Wait()
+	})
+
+	It("Add the nodes in Rancher Manager", func() {
+		// Wait a bit to make sure the VMs is really halted
+		// TODO: Find a better way to check this
+		time.Sleep(5 * time.Minute)
+
+		for index := vmIndex; index <= numberOfVMs; index++ {
+			// Set node hostname
+			hostName := elemental.SetHostname(vmNameRoot, index)
+			Expect(hostName).To(Not(BeEmpty()))
+
+			// Get node information
+			client, _ := GetNodeInfo(hostName)
+			Expect(client).To(Not(BeNil()))
+
+			// Execute in parallel
+			wg.Add(1)
+			go func(c, h string, i int, t bool, cl *tools.Client) {
+				defer wg.Done()
+				defer GinkgoRecover()
+
+				// Restart the node(s)
+				By("Restarting "+h+" to add it in the cluster", func() {
+					// Wait a little bit to avoid starting all VMs at the same time
+					misc.RandomSleep(sequential, i)
+
+					err := exec.Command("sudo", "virsh", "start", h).Run()
+					GinkgoWriter.Printf("Starting VM %s\n", h)
+					Expect(err).To(Not(HaveOccurred()))
+				})
+
+				By("Checking "+h+" SSH connection", func() {
+					CheckSSH(cl)
+				})
+
+				By("Checking that TPM is correctly configured on "+h, func() {
+					testValue := "-c"
+					if t == true {
+						testValue = "! -e"
+					}
+					_ = RunSSHWithRetry(cl, "[[ "+testValue+" /dev/tpm0 ]]")
+				})
+
+				By("Checking OS version on "+h, func() {
+					out := RunSSHWithRetry(cl, "cat /etc/os-release")
+					GinkgoWriter.Printf("OS Version on %s:\n%s\n", h, out)
+				})
+			}(clusterNS, hostName, index, emulateTPM, client)
+
+			// Wait a bit before starting more nodes to reduce CPU and I/O load
+			bootstrappedNodes = misc.WaitNodesBoot(index, vmIndex, bootstrappedNodes, numberOfNodesMax)
+		}
+
+		// Wait for all parallel jobs
+		wg.Wait()
 	})
 })
