@@ -181,9 +181,8 @@ var _ = Describe("E2E - Bootstrapping node", Label("bootstrap"), func() {
 
 		By("Incrementing number of nodes in "+poolType+" pool", func() {
 			// Increase 'quantity' field
-			value, err := rancher.SetNodeQuantity(clusterNS,
-				clusterName,
-				"pool-"+poolType+"-"+clusterName, usedNodes)
+			poolName := "pool-" + poolType + "-" + clusterName
+			value, err := rancher.SetNodeQuantity(clusterNS, clusterName, poolName, usedNodes)
 			Expect(err).To(Not(HaveOccurred()))
 			Expect(value).To(BeNumerically(">=", 1))
 
@@ -193,7 +192,7 @@ var _ = Describe("E2E - Bootstrapping node", Label("bootstrap"), func() {
 					"--namespace", clusterNS,
 					"-o", "jsonpath={.items[*].metadata.name}")
 				return out
-			}, tools.SetTimeout(3*time.Minute), 5*time.Second).Should(ContainSubstring("selector-" + poolType + "-" + clusterName))
+			}, tools.SetTimeout(3*time.Minute), 5*time.Second).Should(ContainSubstring(poolType + "-" + clusterName))
 		})
 
 		By("Waiting for known cluster state before adding the node(s)", func() {

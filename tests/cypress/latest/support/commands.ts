@@ -108,12 +108,12 @@ Cypress.Commands.add('createMachReg', (
         cy.contains(Cypress.env('os_version_install'))
           .click();
       } else {
-          cy.contains('ISO x86_64 v2.0.2')
-          .click();
+          cy.contains(new RegExp('ISO.*'+ Cypress.env('stable_os_version')))
+            .click();
       }
     } else if (utils.isOperatorVersion('registry.suse.com') || utils.isOperatorVersion('marketplace')) {
-      cy.contains('ISO x86_64 v2.0.2')
-        .click();
+        cy.contains(Cypress.env('os_version_install'))
+          .click();
     } else {
       cy.contains('(unstable)')
         .click();
@@ -238,14 +238,27 @@ Cypress.Commands.add('addMachInvLabel', (labelName, labelValue, useHardwareLabel
   cy.get('[data-testid="add-label-mach-inv"] > .kv-container > .kv-item.key').type(labelName);
   cy.get('[data-testid="add-label-mach-inv"] > .kv-container > .kv-item.value').type(labelValue);
   if (useHardwareLabels) {
-    let nthChildIndex = 7;
-    for (const key in hwLabels) {
-      cy.get('[data-testid="add-label-mach-inv"] > .footer > .btn')
-        .click();
-      cy.get(`[data-testid="add-label-mach-inv"] > .kv-container > :nth-child(${nthChildIndex}) > input`).type(key);
-      cy.get(`[data-testid="add-label-mach-inv"] > .kv-container > :nth-child(${nthChildIndex + 1}) 
-        > .value-container > [data-testid="text-area-auto-grow"]`).type(hwLabels[key], {parseSpecialCharSequences: false});
-      nthChildIndex += 3;
+    // Some HTML select tags have changed in Rancher 2.9
+    if (!utils.isRancherManagerVersion('2.9')) {
+      let nthChildIndex = 7;
+      for (const key in hwLabels) {
+        cy.get('[data-testid="add-label-mach-inv"] > .footer > .btn')
+          .click();
+        cy.get(`[data-testid="add-label-mach-inv"] > .kv-container > :nth-child(${nthChildIndex}) > input`).type(key);
+        cy.get(`[data-testid="add-label-mach-inv"] > .kv-container > :nth-child(${nthChildIndex + 1}) 
+          > .value-container > [data-testid="text-area-auto-grow"]`).type(hwLabels[key], {parseSpecialCharSequences: false});
+        nthChildIndex += 3;
+      };
+    } else {
+      let itemIndex = 1;
+      for (const key in hwLabels) {
+        cy.get('[data-testid="add-label-mach-inv"] > .footer > .btn')
+          .click();
+        cy.get(`[data-testid="input-kv-item-key-${itemIndex}"]`).type(key);
+        cy.get(`[data-testid="kv-item-value-${itemIndex}"] > .value-container > [data-testid="value-multiline"]`)
+          .type(hwLabels[key], {parseSpecialCharSequences: false});
+        itemIndex += 1;
+      }
     };
   };
 });
@@ -422,9 +435,16 @@ Cypress.Commands.add('checkLabelSize', (sizeToCheck) => {
 
 // Add an OS version channel
 Cypress.Commands.add('addOsVersionChannel', (channelVersion) => {
-  let channelRepo = `registry.opensuse.org/isv/rancher/elemental/${channelVersion}/containers/rancher/elemental-channel:latest`;
-  if (channelVersion == "stable") {
-    channelRepo = 'registry.suse.com/rancher/elemental-channel:latest';
+  let channelRepo = "";
+  switch (channelVersion) {
+    case "stable":
+      channelRepo = 'registry.suse.com/rancher/elemental-channel:latest';
+      break;
+    case "dev":
+      channelRepo = 'registry.opensuse.org/isv/rancher/elemental/dev/containers/rancher/elemental-unstable-channel:latest';
+      break;
+    default:
+      cy.log("Channel not found");
   }
   cy.clickNavMenu(["Advanced", "OS Version Channels"]);
   cy.getBySel('masthead-create')

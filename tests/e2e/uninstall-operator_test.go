@@ -37,7 +37,7 @@ func deleteFinalizers(ns, object, value string) {
 
 func testClusterAvailability(ns, cluster string) {
 	Eventually(func() string {
-		out, _ := kubectl.RunWithoutErr("get", "cluster",
+		out, _ := kubectl.RunWithoutErr("get", "cluster.v1.provisioning.cattle.io",
 			"--namespace", ns, cluster,
 			"-o", "jsonpath={.metadata.name}")
 		return out
@@ -105,7 +105,7 @@ var _ = Describe("E2E - Uninstall Elemental Operator", Label("uninstall-operator
 
 			By("Deleting cluster resource", func() {
 				Eventually(func() error {
-					_, err := kubectl.RunWithoutErr("delete", "cluster",
+					_, err := kubectl.RunWithoutErr("delete", "cluster.v1.provisioning.cattle.io",
 						"--namespace", ns, name)
 					return err
 				}, tools.SetTimeout(2*time.Minute), 10*time.Second).Should(Not(HaveOccurred()))
@@ -113,7 +113,7 @@ var _ = Describe("E2E - Uninstall Elemental Operator", Label("uninstall-operator
 		}(clusterNS, clusterName)
 
 		// Removing finalizers from MachineInventory and Machine
-		By("Removing finalizers from MachineInventory/Machine", func() {
+		By("Removing finalizers from MachineInventory/Machine and ManagedOsVersion", func() {
 			// NOTE: wait a bit for the cluster deletion to be started (it's running in background)
 			time.Sleep(1 * time.Minute)
 
@@ -135,13 +135,29 @@ var _ = Describe("E2E - Uninstall Elemental Operator", Label("uninstall-operator
 					deleteFinalizers(clusterNS, "Machine", internalMachine)
 				}
 			}
+
+			// On older versions managedOSVersions CRD might be already gone at this stage
+			// ignore error if the managedOSVersion type is unknown
+			mOSList, err := kubectl.RunWithoutErr("get", "ManagedOSVersion",
+				"--namespace", clusterNS, "-o", "jsonpath={.items[*].metadata.name}")
+			if err != nil && strings.Contains(err.Error(), "doesn't have a resource type") {
+				mOSList = ""
+			} else {
+				Expect(err).ToNot((HaveOccurred()))
+			}
+
+			for _, mOS := range strings.Fields(mOSList) {
+				// Delete blocking Finalizers
+				GinkgoWriter.Printf("Deleting Finalizers for ManagedOSVersion '%s'...\n", mOS)
+				deleteFinalizers(clusterNS, "ManagedOSVersion", mOS)
+			}
 		})
 
 		// Wait for cluster deletion to be completed
 		wg.Wait()
 
 		By("Testing cluster resource unavailability", func() {
-			out, err := kubectl.Run("get", "cluster",
+			out, err := kubectl.Run("get", "cluster.v1.provisioning.cattle.io",
 				"--namespace", clusterNS, clusterName,
 				"-o", "jsonpath={.metadata.name}")
 			Expect(err).To(HaveOccurred(), out)
