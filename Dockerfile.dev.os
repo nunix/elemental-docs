@@ -47,7 +47,10 @@ RUN ARCH=$(uname -m); \
       sed \
       btrfsprogs \
       btrfsmaintenance \
-      snapper
+      snapper \
+      glibc-gconv-modules-extra \
+      wget \
+      unzip
 
 # elemental-register dependencies
 RUN ARCH=$(uname -m); \
@@ -55,6 +58,17 @@ RUN ARCH=$(uname -m); \
     zypper --non-interactive install --no-recommends -- \
       dmidecode \
       libopenssl1_1
+
+# Install nmstatectl
+RUN wget https://github.com/nmstate/nmstate/releases/latest/download/nmstatectl-linux-x64.zip && \
+    unzip nmstatectl-linux-x64.zip && \
+    chmod +x nmstatectl && \
+    mv ./nmstatectl /usr/sbin/nmstatectl && \
+    rm nmstatectl-linux-x64.zip
+
+# Install nm-configurator
+RUN curl -o /usr/sbin/nmc -L https://github.com/suse-edge/nm-configurator/releases/latest/download/nmc-linux-$(uname -m)
+RUN chmod +x /usr/sbin/nmc
 
 # SELinux policy and tools
 RUN ARCH=$(uname -m); \

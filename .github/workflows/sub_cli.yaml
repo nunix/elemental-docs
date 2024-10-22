@@ -32,6 +32,9 @@ on:
       force_downgrade:
         required: true
         type: boolean
+      full_backup_restore:
+        required: true
+        type: boolean
       k8s_downstream_version:
         required: true
         type: string
@@ -39,6 +42,9 @@ on:
         required: true
         type: string
       node_number:
+        required: true
+        type: string
+      operator_install_type:
         required: true
         type: string
       operator_repo:
@@ -130,6 +136,7 @@ jobs:
       K8S_UPSTREAM_VERSION: ${{ inputs.k8s_upstream_version }}
       # For K8s cluster to provision with Rancher Manager
       K8S_DOWNSTREAM_VERSION: ${{ inputs.k8s_downstream_version }}
+      OPERATOR_INSTALL_TYPE: ${{ inputs.operator_install_type }}
       OS_TO_TEST: ${{ inputs.os_to_test }}
       # For Rancher Manager
       RANCHER_VERSION: ${{ inputs.rancher_version }}
@@ -173,9 +180,8 @@ jobs:
             kubectl apply -f tests/assets/add_missing_dynamicschemas.yaml
           fi
 
-      - name: Install backup-restore components (K3s only for now)
+      - name: Install backup-restore components
         id: install_backup_restore
-        if: ${{ contains(inputs.k8s_upstream_version, 'k3s') }}
         env:
           BACKUP_RESTORE_VERSION: ${{ inputs.backup_restore_version }}
         run: cd tests && make e2e-install-backup-restore
@@ -267,18 +273,12 @@ jobs:
 
       - name: Install a simple application
         id: install_simple_app
-        if: ${{ contains(inputs.k8s_downstream_version, 'k3s') }}
         run: cd tests && make e2e-install-app && make e2e-check-app
 
       - name: Reset a node in the cluster
         id: reset_node
         if: ${{ inputs.reset == true }}
-        run: cd tests && make e2e-reset
-
-      - name: Check application after reset
-        id: check_app
-        if: ${{ inputs.reset == true && contains(inputs.k8s_downstream_version, 'k3s') }}
-        run: cd tests && make e2e-check-app
+        run: cd tests && make e2e-reset && make e2e-check-app
 
       - name: Upgrade Elemental Operator
         id: operator_upgrade
@@ -286,20 +286,25 @@ jobs:
         env:
           OPERATOR_UPGRADE: ${{ inputs.operator_upgrade }}
         run: |
-          cd tests && make e2e-upgrade-operator
-          if ${{ contains(inputs.k8s_downstream_version, 'k3s') }}; then
+          cd tests
+
+          if make e2e-upgrade-operator; then
+            # Extract elemental-operator version
+            OPERATOR_VERSION=$(kubectl get pod \
+                               --namespace cattle-elemental-system \
+                               -l app=elemental-operator \
+                               -o jsonpath={.items[*].status.containerStatuses[*].image} 2> /dev/null || true)
+
+            # Export values
+            echo "operator_upgrade=${OPERATOR_UPGRADE}" >> ${GITHUB_OUTPUT}
+            echo "operator_version=${OPERATOR_VERSION}" >> ${GITHUB_OUTPUT}
+
+            # Check application
             make e2e-check-app
+          else
+            # Needed to be sure that Github Action will see the failure
+            false
           fi
-
-          # Extract elemental-operator version
-          OPERATOR_VERSION=$(kubectl get pod \
-                             --namespace cattle-elemental-system \
-                             -l app=elemental-operator \
-                             -o jsonpath={.items[*].status.containerStatuses[*].image} 2> /dev/null || true)
-
-          # Export values
-          echo "operator_upgrade=${OPERATOR_UPGRADE}" >> ${GITHUB_OUTPUT}
-          echo "operator_version=${OPERATOR_VERSION}" >> ${GITHUB_OUTPUT}
 
       - name: Upgrade Rancher Manager
         id: rancher_upgrade
@@ -310,19 +315,24 @@ jobs:
           PUBLIC_DOMAIN: ${{ inputs.public_domain }}
           RANCHER_UPGRADE: ${{ inputs.rancher_upgrade }}
         run: |
-          cd tests && make e2e-upgrade-rancher-manager
-          if ${{ contains(inputs.k8s_downstream_version, 'k3s') }}; then
+          cd tests
+
+          if make e2e-upgrade-rancher-manager; then
+            # Extract Rancher Manager version
+            RANCHER_VERSION=$(kubectl get pod \
+                                --namespace cattle-system \
+                                -l app=rancher \
+                                -o jsonpath={.items[*].status.containerStatuses[*].image} 2> /dev/null || true)
+
+            # Export values
+            echo "rancher_image_version=${RANCHER_VERSION}" >> ${GITHUB_OUTPUT}
+
+            # Check application
             make e2e-check-app
+          else
+            # Needed to be sure that Github Action will see the failure
+            false
           fi
-
-          # Extract Rancher Manager version
-          RANCHER_VERSION=$(kubectl get pod \
-                              --namespace cattle-system \
-                              -l app=rancher \
-                              -o jsonpath={.items[*].status.containerStatuses[*].image} 2> /dev/null || true)
-
-          # Export values
-          echo "rancher_image_version=${RANCHER_VERSION}" >> ${GITHUB_OUTPUT}
 
       - name: Upgrade node 1 to specified OS version with osImage
         id: upgrade_node_1
@@ -333,10 +343,7 @@ jobs:
           UPGRADE_TYPE: osImage
           VM_INDEX: 1
         run: |
-          cd tests && make e2e-upgrade-node
-          if ${{ contains(inputs.k8s_downstream_version, 'k3s') }}; then
-            make e2e-check-app
-          fi
+          cd tests && make e2e-upgrade-node && make e2e-check-app
 
       - name: Upgrade other nodes to specified OS version with managedOSVersionName
         id: upgrade_other_nodes
@@ -348,19 +355,27 @@ jobs:
           VM_INDEX: 2
           VM_NUMBERS: 3
         run: |
-          cd tests && make e2e-upgrade-node
-          if ${{ contains(inputs.k8s_downstream_version, 'k3s') }}; then
-            make e2e-check-app
+          cd tests && make e2e-upgrade-node && make e2e-check-app
+
+      - name: Test Backup/Restore Rancher Manager/Elemental resources
+        id: test_backup_restore
+        env:
+          CA_TYPE: ${{ inputs.ca_type }}
+          OPERATOR_REPO: ${{ inputs.operator_repo }}
+          PUBLIC_FQDN: ${{ inputs.public_fqdn }}
+          PUBLIC_DOMAIN: ${{ inputs.public_domain }}
+        run: |
+          cd tests
+
+          # Run simple or full backup/restore test
+          if ${{ inputs.full_backup_restore == true }}; then
+            make e2e-full-backup-restore
+          else
+            make e2e-simple-backup-restore
           fi
 
-      - name: Test Backup/Restore Elemental resources with Rancher Manager
-        id: test_backup_restore
-        if: ${{ contains(inputs.k8s_upstream_version, 'k3s') }}
-        run: |
-          cd tests && make e2e-backup-restore
-          if ${{ contains(inputs.k8s_downstream_version, 'k3s') }}; then
-            make e2e-check-app
-          fi
+          # Check the installed application
+          make e2e-check-app
 
       - name: Extract ISO version
         id: iso_version
@@ -415,27 +430,25 @@ jobs:
             export VM_CPU=6
           fi
 
+          cd tests
           if ${{ inputs.sequential == true }}; then
             # Force node bootstrapping in sequential instead of parallel
-            cd tests
             for ((i = VM_START ; i <= VM_END ; i++)); do
               VM_INDEX=${i} make e2e-bootstrap-node
             done
           else
-            cd tests && VM_INDEX=${VM_START} VM_NUMBERS=${VM_END} make e2e-bootstrap-node
+            VM_INDEX=${VM_START} VM_NUMBERS=${VM_END} make e2e-bootstrap-node
           fi
 
           # Check the installed application
-          if ${{ contains(inputs.k8s_downstream_version, 'k3s') }}; then
-            make e2e-check-app
-          fi
+          make e2e-check-app
 
       - name: Uninstall Elemental Operator
         id: uninstall_elemental_operator
         env:
           OPERATOR_REPO: ${{ inputs.operator_repo }}
         # Don't test Operator uninstall if we want to keep the runner for debugging purposes
-        if: ${{ inputs.destroy_runner == true }}
+        if: ${{ inputs.destroy_runner == true && inputs.full_backup_restore == false }}
         run: cd tests && make e2e-uninstall-operator
 
       # This step must be called in each worklow that wants a summary!
@@ -463,6 +476,7 @@ jobs:
           rancher_version: ${{ inputs.rancher_version }}
           sequential: ${{ inputs.sequential }}
           snap_type: ${{ inputs.snap_type }}
+          steps_status: ${{ join(steps.*.conclusion, ' ') }}
           test_type: ${{ inputs.test_type }}
           upgrade_image: ${{ inputs.upgrade_image }}
           upgrade_os_channel: ${{ inputs.upgrade_os_channel }}

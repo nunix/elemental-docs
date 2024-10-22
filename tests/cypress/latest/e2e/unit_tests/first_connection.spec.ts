@@ -16,14 +16,23 @@ import filterTests from '~/support/filterTests.js';
 import * as cypressLib from '@rancher-ecp-qa/cypress-library';
 import { qase } from 'cypress-qase-reporter/dist/mocha';
 
-
 filterTests(['main', 'upgrade'], () => {
   Cypress.config();
   describe('First login on Rancher', () => {
     qase(46,
       it('Log in and accept terms and conditions', () => {
-      cypressLib.firstLogin();
+        cypressLib.firstLogin();
       })
     );
+    // We need to enable prerelease versions to install the elemental dev operator
+    it('Enable Helm Chart Prerelease versions', () => {
+      cy.login();
+      cy.visit('/');
+      cy.getBySel('nav_header_showUserMenu').click();
+      cy.getBySel('user-menu-dropdown').contains('Preferences').click();
+      cy.clickButton('Include Prerelease Versions');
+      cypressLib.burgerMenuToggle();
+      cy.getBySel('side-menu').contains('Home').click();
+    });
   })
 });

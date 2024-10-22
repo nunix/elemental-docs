@@ -10,15 +10,35 @@ export const isCypressTag = (tag: string) => {
   return (new RegExp(tag)).test(Cypress.env("cypress_tags"));
 }
 
+// Check the Git repo to pull charts from
+export const isGitRepo = (repo: string) => {
+  return (new RegExp(repo)).test(Cypress.env("rancher_git_chart"));
+}
+
 // Check the K8s version
 export const isK8sVersion = (version: string) => {
   version = version.toLowerCase();
   return (new RegExp(version)).test(Cypress.env("k8s_downstream_version"));
 }
 
+// Check if Rancher Prime is used
+export const isRancherPrime = () => {
+  return (new RegExp('prime')).test(Cypress.env("rancher_channel"));
+}
+
+// Check how to install the operator
+export const isOperatorInstallType = (type: string) => {
+  return (new RegExp(type)).test(Cypress.env("operator_install_type"));
+}
+
 // Check the Elemental operator version
 export const isOperatorVersion = (version: string) => {
   return (new RegExp(version)).test(Cypress.env("operator_repo"));
+}
+
+// Check OS version to test
+export const isOsVersion = (version: string) => {
+  return (new RegExp(version)).test(Cypress.env("os_version_to_test"));
 }
 
 // Check rancher manager version
@@ -83,7 +103,7 @@ export const createCluster = (clusterName: string, k8sVersion: string, proxy: st
       .type('NO_PROXY');
     cy.getBySel('kv-item-value-2')
       .type('localhost,127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local');
-    }
+  }
   cy.clickButton('Create');
   // This wait can be replaced by something cleaner
   // eslint-disable-next-line cypress/no-unnecessary-waiting

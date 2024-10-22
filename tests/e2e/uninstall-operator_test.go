@@ -85,13 +85,21 @@ var _ = Describe("E2E - Uninstall Elemental Operator", Label("uninstall-operator
 
 		// NOTE: the operator cannot be reinstall now because there are still CRDs pending to be removed
 		By("Checking that Elemental operator CRDs cannot be reinstalled", func() {
+			// Set flags for installation
 			chart := "elemental-operator-crds"
-			out, err := kubectl.RunHelmBinaryWithOutput("upgrade", "--install", chart,
-				operatorRepo+"/"+chart+"-chart",
+			flags := []string{"upgrade", "--install", chart,
+				operatorRepo + "/" + chart + "-chart",
 				"--namespace", "cattle-elemental-system",
 				"--create-namespace",
 				"--wait", "--wait-for-jobs",
-			)
+			}
+
+			// Dev and Staging versions need a specific treatment
+			if strings.Contains(os2Test, "dev") || strings.Contains(os2Test, "staging") {
+				flags = append(flags, "--devel")
+			}
+
+			out, err := kubectl.RunHelmBinaryWithOutput(flags...)
 			Expect(err).To(HaveOccurred(), out)
 			Expect(out).To(ContainSubstring("CRDs from previous installations are pending to be removed"))
 		})
@@ -122,8 +130,14 @@ var _ = Describe("E2E - Uninstall Elemental Operator", Label("uninstall-operator
 			Expect(err).To(Not(HaveOccurred()))
 
 			for _, machine := range strings.Fields(machineList) {
-				internalMachine, err := elemental.GetInternalMachine(clusterNS, machine)
-				Expect(err).To(Not(HaveOccurred()))
+				var internalMachine string
+
+				// Sporadic timeouts can occur sometimes
+				Eventually(func() error {
+					var err error
+					internalMachine, err = elemental.GetInternalMachine(clusterNS, machine)
+					return err
+				}, tools.SetTimeout(1*time.Minute), 10*time.Second).Should(Not(HaveOccurred()))
 
 				// Delete blocking Finalizers
 				GinkgoWriter.Printf("Deleting Finalizers for MachineInventory '%s'...\n", machine)
@@ -171,18 +185,26 @@ var _ = Describe("E2E - Uninstall Elemental Operator", Label("uninstall-operator
 
 		By("Installing Operator via Helm", func() {
 			for _, chart := range []string{"elemental-operator-crds", "elemental-operator"} {
-				RunHelmCmdWithRetry("upgrade", "--install", chart,
-					operatorRepo+"/"+chart+"-chart",
+				// Set flags for installation
+				flags := []string{"upgrade", "--install", chart,
+					operatorRepo + "/" + chart + "-chart",
 					"--namespace", "cattle-elemental-system",
 					"--create-namespace",
 					"--wait", "--wait-for-jobs",
-				)
+				}
+
+				// Dev and Staging versions need a specific treatment
+				if strings.Contains(os2Test, "dev") || strings.Contains(os2Test, "staging") {
+					flags = append(flags, "--devel")
+				}
+
+				RunHelmCmdWithRetry(flags...)
 			}
 
 			// Wait for pod to be started
 			Eventually(func() error {
 				return rancher.CheckPod(k, [][]string{{"cattle-elemental-system", "app=elemental-operator"}})
-			}, tools.SetTimeout(4*time.Minute), 30*time.Second).Should(BeNil())
+			}, tools.SetTimeout(4*time.Minute), 30*time.Second).Should(Not(HaveOccurred()))
 		})
 
 		By("Creating a dumb MachineRegistration", func() {

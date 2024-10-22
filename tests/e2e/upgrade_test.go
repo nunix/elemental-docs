@@ -15,6 +15,7 @@ limitations under the License.
 package e2e_test
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"strconv"
@@ -28,7 +29,28 @@ import (
 	"github.com/rancher-sandbox/ele-testhelpers/rancher"
 	"github.com/rancher-sandbox/ele-testhelpers/tools"
 	"github.com/rancher/elemental/tests/e2e/helpers/elemental"
+	"gopkg.in/yaml.v3"
 )
+
+func getAnnotations(cl *tools.Client) map[string]string {
+	annotationsStr, err := kubectl.RunWithoutErr(
+		"get", "machineinventory",
+		"--namespace", clusterNS,
+		"-o", "jsonpath={.items[?(@.metadata.annotations.elemental\\.cattle\\.io/registration-ip==\""+strings.Replace(cl.Host, ":22", "", -1)+"\")].metadata.annotations}",
+	)
+	Expect(err).To(Not(HaveOccurred()))
+
+	annotations := make(map[string]string)
+	err = yaml.Unmarshal([]byte(annotationsStr), &annotations)
+	Expect(err).To(Not(HaveOccurred()))
+
+	// For debugging purposes
+	for a, b := range annotations {
+		GinkgoWriter.Printf("%s: %s\n", a, b)
+	}
+
+	return annotations
+}
 
 var _ = Describe("E2E - Upgrading Elemental Operator", Label("upgrade-operator"), func() {
 	// Create kubectl context
@@ -56,23 +78,7 @@ var _ = Describe("E2E - Upgrading Elemental Operator", Label("upgrade-operator")
 			upgradeOrder = []string{"elemental-operator", "elemental-operator-crds"}
 		}
 
-		for _, chart := range upgradeOrder {
-			RunHelmCmdWithRetry(
-				"upgrade", "--install", chart,
-				operatorUpgrade+"/"+chart+"-chart",
-				"--namespace", "cattle-elemental-system",
-				"--create-namespace",
-				"--wait", "--wait-for-jobs",
-			)
-
-			// Delay few seconds for all to be installed
-			time.Sleep(tools.SetTimeout(20 * time.Second))
-		}
-
-		// Wait for all pods to be started
-		Eventually(func() error {
-			return rancher.CheckPod(k, [][]string{{"cattle-elemental-system", "app=elemental-operator"}})
-		}, tools.SetTimeout(4*time.Minute), 30*time.Second).Should(BeNil())
+		InstallElementalOperator(k, upgradeOrder, operatorUpgrade)
 	})
 })
 
@@ -132,9 +138,6 @@ var _ = Describe("E2E - Upgrading Rancher Manager", Label("upgrade-rancher-manag
 			return rancher.CheckPod(k, checkList)
 		}, tools.SetTimeout(3*time.Minute), 10*time.Second).Should(Not(HaveOccurred()))
 
-		// A bit dirty be better to wait a little here for all to be correctly started
-		time.Sleep(2 * time.Minute)
-
 		// Check that all pods are using the same version
 		Eventually(func() int {
 			out, _ := kubectl.RunWithoutErr(getImageVersion...)
@@ -151,9 +154,11 @@ var _ = Describe("E2E - Upgrading Rancher Manager", Label("upgrade-rancher-manag
 
 var _ = Describe("E2E - Upgrading node", Label("upgrade-node"), func() {
 	var (
-		value        string
-		valueToCheck string
-		wg           sync.WaitGroup
+		annotationsAfter  map[string]string
+		annotationsBefore map[string]string
+		value             string
+		valueToCheck      string
+		wg                sync.WaitGroup
 	)
 
 	It("Upgrade node", func() {
@@ -179,9 +184,8 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade-node"), func() {
 				defer wg.Done()
 				defer GinkgoRecover()
 
-				By("Checking OS version on "+h+" before upgrade", func() {
-					out := RunSSHWithRetry(cl, "cat /etc/os-release")
-					GinkgoWriter.Printf("OS Version on %s:\n%s\n", h, out)
+				By("Getting annotations for "+h+" before upgrade", func() {
+					annotationsBefore = getAnnotations(cl)
 				})
 			}(hostName, client)
 		}
@@ -203,7 +207,7 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade-node"), func() {
 				// In case of sync failure OSVersion can be empty,
 				// so try to force the sync before aborting
 				if string(OSVersion) == "" {
-					const channel = "elemental-channel"
+					const channel = "unstable-testing-channel"
 
 					// Log the workaround, could be useful
 					GinkgoWriter.Printf("!! ManagedOSVersionChannel not synced !! Triggering a re-sync!\n")
@@ -326,6 +330,12 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade-node"), func() {
 			client, _ := GetNodeInfo(hostName)
 			Expect(client).To(Not(BeNil()))
 
+			// Toggle Grub recovery entry test if only one node is upgraded
+			grubRecovery := false
+			if usedNodes == 1 {
+				grubRecovery = true
+			}
+
 			// Execute node deployment in parallel
 			wg.Add(1)
 			go func(h string, cl *tools.Client) {
@@ -343,10 +353,42 @@ var _ = Describe("E2E - Upgrading node", Label("upgrade-node"), func() {
 					}, tools.SetTimeout(5*time.Minute), 30*time.Second).Should(Equal(valueToCheck))
 				})
 
-				By("Checking OS version on "+h+" after upgrade", func() {
-					out := RunSSHWithRetry(cl, "cat /etc/os-release")
-					GinkgoWriter.Printf("OS Version on %s:\n%s\n", h, out)
+				By("Getting annotations for "+h+" after upgrade", func() {
+					annotationsAfter = getAnnotations(cl)
 				})
+
+				By("Checking that annotations have been updated after upgrade", func() {
+					// Maps should not be equal after an upgrade
+					status := maps.Equal(annotationsBefore, annotationsAfter)
+					if status {
+						GinkgoWriter.Println("Annotations have not been updated!")
+					}
+					Expect(status).To(BeFalse())
+				})
+
+				if grubRecovery {
+					By("Testing Grub Recovery entry on "+h+" after upgrade", func() {
+						_ = RunSSHWithRetry(cl, "grub2-editenv /oem/grubenv set next_entry=recovery")
+
+						// Check that the recovery entry is selected
+						out := RunSSHWithRetry(cl, "grub2-editenv /oem/grubenv list | grep next_entry")
+						Expect(out).To(ContainSubstring("recovery"))
+
+						// Reboot in recovery, execute 'reboot' in background, to avoid SSH locking
+						_ = RunSSHWithRetry(cl, "setsid -f reboot")
+
+						// Check the mode after reboot
+						out = RunSSHWithRetry(cl, "cat /run/cos/recovery_mode")
+						Expect(out).To(Not(BeEmpty()))
+
+						// Final reboot, in active mode as recovery mode is not persistent
+						_ = RunSSHWithRetry(cl, "setsid -f reboot")
+
+						// Check the mode after fnal reboot
+						out = RunSSHWithRetry(cl, "cat /run/cos/active_mode")
+						Expect(out).To(Not(BeEmpty()))
+					})
+				}
 			}(hostName, client)
 		}
 

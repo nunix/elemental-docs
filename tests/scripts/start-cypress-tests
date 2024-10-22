@@ -2,7 +2,7 @@
 
 set -evx
 
-ELEMENTAL_MEDIA_PATH="/home/gh-runner/actions-runner/_work/elemental/elemental/elemental-from-cypress.$BOOT_TYPE"
+ELEMENTAL_MEDIA_PATH="/home/gh-runner/actions-runner/_work/elemental/elemental/elemental-from-cypress.${BOOT_TYPE}"
 
 # Start a simple HTTP server for sharing some config files
 HTTP_SRV_CMD="python3 -m http.server"
@@ -16,56 +16,72 @@ pushd cypress/latest
 npm install
 
 # Check if we have to report to QASE
-[[ -n $QASE_RUN_ID ]] && QASE_REPORT=1
+[[ -n "${QASE_RUN_ID}" ]] && QASE_REPORT=1
 
 # Install yq for parsing yaml files
+# Force 'true' in case of error, as zypper can return code greater than 0 for other reasons (see zypper doc)
 # TODO: yq will be added into the next OS image
-sudo zypper in -y yq
+sudo zypper -n in -l yq || true
+
+# Check if yq is available
+which yq >/dev/null 2>&1
 
 # Get latest stable Elemental OS version mainly for upgrade test
 OS_IMAGE=$(helm template oci://registry.suse.com/rancher/elemental-operator-chart \
   | yq 'select(.kind=="ManagedOSVersionChannel") .spec.options.image')
 
-STABLE_OS_VERSION=$(docker run --entrypoint busybox ${OS_IMAGE} cat channel.json \
-  | jq -r '.[].spec.version' \
+ISO_STABLE_OS_VERSION=$(docker run --entrypoint busybox ${OS_IMAGE} cat channel.json \
+  | jq -r '.[].spec |select(.type=="iso").version' \
+  | sort -V \
+  | tail -1)
+
+CONTAINER_STABLE_OS_VERSION=$(docker run --entrypoint busybox ${OS_IMAGE} cat channel.json \
+  | jq -r '.[].spec |select(.type=="container").version' \
   | sort -V \
   | tail -1)
 
 # Start Cypress tests with docker
-docker run -v $PWD:/workdir -w /workdir               \
-    -e BOOT_TYPE=$BOOT_TYPE                           \
-    -e CYPRESS_TAGS=$CYPRESS_TAGS                     \
-    -e ELEMENTAL_DEV_VERSION=$ELEMENTAL_DEV_VERSION   \
-    -e ELEMENTAL_UI_VERSION=$ELEMENTAL_UI_VERSION     \
-    -e CHARTMUSEUM_REPO=$CHARTMUSEUM_REPO             \
-    -e K8S_UPSTREAM_VERSION=$K8S_UPSTREAM_VERSION     \
-    -e K8S_DOWNSTREAM_VERSION=$K8S_DOWNSTREAM_VERSION \
-    -e OPERATOR_REPO=$OPERATOR_REPO                   \
-    -e OS_VERSION_INSTALL=$OS_VERSION_INSTALL         \
-    -e OS_VERSION_TARGET=$OS_VERSION_TARGET           \
-    -e PROXY=$PROXY                                   \
-    -e QASE_API_TOKEN=$QASE_API_TOKEN                 \
-    -e QASE_REPORT=$QASE_REPORT                       \
-    -e QASE_RUN_ID=$QASE_RUN_ID                       \
-    -e RANCHER_VERSION=$RANCHER_VERSION               \
-    -e RANCHER_PASSWORD=$RANCHER_PASSWORD             \
-    -e RANCHER_URL=$RANCHER_URL                       \
-    -e RANCHER_USER=$RANCHER_USER                     \
-    -e STABLE_OS_VERSION=$STABLE_OS_VERSION           \
-    -e UI_ACCOUNT=$UI_ACCOUNT                         \
-    -e UPGRADE_FROM_VERSION=$UPGRADE_FROM_VERSION     \
-    -e UPGRADE_IMAGE=$UPGRADE_IMAGE                   \
-    -e UPGRADE_OS_CHANNEL=$UPGRADE_OS_CHANNEL         \
-    --add-host host.docker.internal:host-gateway      \
-    --ipc=host                                        \
-    $CYPRESS_DOCKER                                   \
+docker run -v $PWD:/workdir -w /workdir                         \
+    -e BOOT_TYPE=$BOOT_TYPE                                     \
+    -e CYPRESS_TAGS=$CYPRESS_TAGS                               \
+    -e ELEMENTAL_DEV_VERSION=$ELEMENTAL_DEV_VERSION             \
+    -e ELEMENTAL_UI_VERSION=$ELEMENTAL_UI_VERSION               \
+    -e CHARTMUSEUM_REPO=$CHARTMUSEUM_REPO                       \
+    -e CONTAINER_STABLE_OS_VERSION=$CONTAINER_STABLE_OS_VERSION \
+    -e K8S_UPSTREAM_VERSION=$K8S_UPSTREAM_VERSION               \
+    -e K8S_DOWNSTREAM_VERSION=$K8S_DOWNSTREAM_VERSION           \
+    -e OPERATOR_INSTALL_TYPE=$OPERATOR_INSTALL_TYPE             \
+    -e OPERATOR_REPO=$OPERATOR_REPO                             \
+    -e OS_VERSION_INSTALL=$OS_VERSION_INSTALL                   \
+    -e OS_VERSION_TARGET=$OS_VERSION_TARGET                     \
+    -e OS_VERSION_TO_TEST=$OS_VERSION_TO_TEST                   \
+    -e PROXY=$PROXY                                             \
+    -e QASE_API_TOKEN=$QASE_API_TOKEN                           \
+    -e QASE_REPORT=$QASE_REPORT                                 \
+    -e QASE_RUN_ID=$QASE_RUN_ID                                 \
+    -e RANCHER_CHANNEL=$RANCHER_CHANNEL                         \
+    -e RANCHER_GIT_CHART=$RANCHER_GIT_CHART                     \
+    -e RANCHER_VERSION=$RANCHER_VERSION                         \
+    -e RANCHER_PASSWORD=$RANCHER_PASSWORD                       \
+    -e RANCHER_URL=$RANCHER_URL                                 \
+    -e RANCHER_USER=$RANCHER_USER                               \
+    -e ISO_STABLE_OS_VERSION=$ISO_STABLE_OS_VERSION             \
+    -e UI_ACCOUNT=$UI_ACCOUNT                                   \
+    -e UPGRADE_FROM_VERSION=$UPGRADE_FROM_VERSION               \
+    -e UPGRADE_IMAGE=$UPGRADE_IMAGE                             \
+    -e UPGRADE_OS_CHANNEL=$UPGRADE_OS_CHANNEL                   \
+    --add-host host.docker.internal:host-gateway                \
+    --ipc=host                                                  \
+    $CYPRESS_DOCKER                                             \
     -s $SPEC
 
 [[ -d downloads ]] && sudo chown -R gh-runner:users downloads videos
 
 if [[ ! -f ${ELEMENTAL_MEDIA_PATH} ]]; then
-  # Move elemental.iso into the expected folder
-  mv downloads/*.${BOOT_TYPE} ${ELEMENTAL_MEDIA_PATH} 2>/dev/null; true
+  # Move elemental image into the expected folder
+  for EXT in iso img; do
+    mv downloads/*.${EXT} ${ELEMENTAL_MEDIA_PATH} 2>/dev/null || true
+  done
 fi
 popd
 

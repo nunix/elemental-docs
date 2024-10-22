@@ -45,6 +45,10 @@ on:
         description: Force OS downgrade
         default: false
         type: boolean
+      full_backup_restore:
+        description: Test migration-like backup/restore functionality
+        default: false
+        type: boolean
       k8s_downstream_version:
         description: Rancher cluster downstream version to use
         type: string
@@ -54,6 +58,10 @@ on:
       node_number:
         description: Number of nodes to deploy on the provisioned cluster
         default: 5
+        type: string
+      operator_install_type:
+        description: Type of installation to use for the Elemental operator (cli/ui)
+        default: cli
         type: string
       operator_repo:
         description: Elemental operator repository to use
@@ -78,6 +86,10 @@ on:
       qase_run_id:
         description: Case run ID where the results will be reported
         default: auto
+        type: string
+      rancher_git_chart:
+        description: Point to github or rancher git for chart installation
+        default: rancher
         type: string
       rancher_upgrade:
         description: Rancher Manager channel/version to upgrade to
@@ -224,8 +236,10 @@ jobs:
       destroy_runner: ${{ inputs.destroy_runner }}
       elemental_ui_version: ${{ inputs.elemental_ui_version }}
       force_downgrade: ${{ inputs.force_downgrade }}
+      full_backup_restore: ${{ inputs.full_backup_restore }}
       k8s_downstream_version: ${{ inputs.k8s_downstream_version }}
       node_number: ${{ inputs.node_number }}
+      operator_install_type: ${{ inputs.operator_install_type }}
       operator_repo: ${{ inputs.operator_repo }}
       operator_upgrade: ${{ inputs.operator_upgrade }}
       os_to_test: ${{ inputs.os_to_test }}
@@ -236,6 +250,7 @@ jobs:
       public_fqdn: ${{ needs.create-runner.outputs.public_fqdn }}
       qase_project_code: ELEMENTAL
       qase_run_id: ${{ needs.pre-qase.outputs.qase_run_id }}
+      rancher_git_chart: ${{ inputs.rancher_git_chart }}
       rancher_upgrade: ${{ inputs.rancher_upgrade }}
       rancher_version: ${{ inputs.rancher_version }}
       reset: ${{ inputs.reset }}
@@ -253,16 +268,12 @@ jobs:
 
   clean-and-delete-runner:
     needs: [create-runner, e2e]
-    if: ${{ always() }}
+    if: ${{ always() && needs.create-runner.result == 'success' && inputs.destroy_runner == true }}
     uses: ./.github/workflows/sub_clean-and-delete-runner.yaml
     secrets:
       credentials: ${{ secrets.credentials }}
-      pat_token: ${{ secrets.pat_token }}
     with:
-      create_runner_result: ${{ needs.create-runner.result }}
-      destroy_runner: ${{ inputs.destroy_runner }}
       runner_hostname: ${{ needs.create-runner.outputs.runner_hostname }}
-      runner_label: ${{ needs.create-runner.outputs.runner_label }}
       zone: ${{ inputs.zone }}
 
   post-qase:
@@ -301,12 +312,3 @@ jobs:
       - name: Delete Qase Run if job has been cancelled
         if: ${{ contains(needs.e2e.outputs.steps_status, 'cancelled') }}
         run: cd tests && make delete-qase-run
-
-  # Just to signify that something has been cancelled and it's not useful to check the test
-  declare-cancelled:
-    needs: e2e
-    if: ${{ always() && contains(needs.e2e.outputs.steps_status, 'cancelled') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Specify in summary if something has been cancelled
-        run: echo "# TEST CANCELLED!" >> ${GITHUB_STEP_SUMMARY}

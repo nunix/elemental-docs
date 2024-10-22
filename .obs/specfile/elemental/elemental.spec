@@ -15,6 +15,9 @@
 # Please submit bugfixes or comments via https://bugs.opensuse.org/
 #
 
+%define commit _replaceme_
+%define c_date _replaceme_
+
 %define systemdir /system
 %define oemdir %{systemdir}/oem
 
@@ -25,13 +28,11 @@ Summary:        A Rancher and Kubernetes optimized immutable Linux distribution
 License:        Apache-2.0
 Group:          System/Management
 URL:            https://github.com/rancher/%{name}
-Source:         %{name}-%{version}.tar
-Source1:        LICENSE
-Source2:        README.md
+Source:         %{name}.tar.xz
 Source3:        %{name}-rpmlintrc
 
-Requires:       elemental-toolkit >= 2.1.0
-Requires:       elemental-toolkit < 2.2.0
+Requires:       elemental-toolkit >= 2.2.0
+Requires:       elemental-toolkit < 2.3.0
 Requires:       elemental-register
 Requires:       elemental-system-agent
 Requires:       elemental-support
@@ -55,9 +56,7 @@ Group:          System/Management
 Rancher elemental node updater. To be installed on the node.
 
 %prep
-%setup -q -n %{name}-%{version}
-cp %{S:1} .
-cp %{S:2} .
+%setup -q -n %{name}
 
 %build
 

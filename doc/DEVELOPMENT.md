@@ -26,7 +26,7 @@ Clone the following repositories in your development environment:
     Using the `elemental-operator` repo:  
 
     ```bash
-    make setup-full-cluster 
+    LOCAL_BUILD=true make setup-full-cluster 
     ```
 
     If everything succeeded, you should be able to login into Rancher at: <https://172.18.0.2.sslip.io>
@@ -98,13 +98,6 @@ Clone the following repositories in your development environment:
 
     ```bash
     wget --no-check-certificate `kubectl get seedimage -n fleet-default fire-img -o jsonpath="{.status.downloadURL}"` -O elemental-dev.x86_64.iso
-    ```
-
-    The default example also creates a seed image using the `loopdevice` snapshotter.  
-    Beware that the loopdevice images are registered to a different `MachineRegistration`.  
-
-    ```bash
-    wget --no-check-certificate `kubectl get seedimage -n fleet-default fire-img-loopdevice -o jsonpath="{.status.downloadURL}"` -O elemental-dev-loopdevice.x86_64.iso
     ```
 
     You can now use this ISO to provision Elemental machines, for example using an hypervisor on your dev environment.  
@@ -215,3 +208,71 @@ The steps are equivalent for downgrades, by just checking out older versions of 
 1. Troubleshoot eventual issues
 
     In case of errors, refer to the [upgrade troubleshooting documentation](https://elemental.docs.rancher.com/troubleshooting-upgrade).
+
+## Testing the Rancher private CA cert rotation
+
+The Rancher development environment comes configured with a private CA certificate.  
+For more information, consult the official [documentation](https://ranchermanager.docs.rancher.com/getting-started/installation-and-upgrade/resources/update-rancher-certificate#updating-a-private-ca-certificate).  
+
+### Setup
+
+1. `cert-manager` is used for a self-signed test issuer:
+
+    ```sh
+    kubectl -n cattle-system get issuers
+    NAME                   READY   AGE
+    elemental-ca           True    90s
+    elemental-selfsigned   True    90s
+    rancher                True    83s
+    ```
+
+1. Rancher is installed using the chart value `privateCA=true`. This will make it mount a `cacerts.pem` file from the `tls-ca` secret:
+
+    ```sh
+    kubectl -n cattle-system get certificates
+    NAME                  READY   SECRET                AGE
+    tls-ca                True    tls-ca                2m35s
+    tls-rancher-ingress   True    tls-rancher-ingress   2m35s
+    ```
+
+1. The `tls-rancher-ingress` is signed by the private CA.  
+
+### Renew the CA cert
+
+1. Before you start, make sure you have something to test this process with, like an already provisioned downstream cluster.
+   Save the current `cacerts` value from Rancher, so that you can compare it later to verify it changed: <https://172.18.0.2.sslip.io/cacerts>
+
+1. Delete the `tls-ca` secret. `cert-manager` should create a new one immediately after.
+
+    ```sh
+    kubectl -n cattle-system delete secret tls-ca
+    ```
+
+1. (Quirk) Copy the `tls.crt` from the secret into `cacerts.pem` for Rancher to mount it correctly:
+
+    ```sh
+    export TEST_CA="$(kubectl -n cattle-system get secret tls-ca -o jsonpath="{.data['tls\.crt']}")"
+    kubectl -n cattle-system patch secret tls-ca -p "{\"data\":{\"cacerts.pem\":\""$TEST_CA"\"}}"
+    ```
+
+1. Delete the `tls-rancher-ingress` secret. `cert-manager` should create a new one immediately after.
+
+    ```sh
+    kubectl -n cattle-system delete secret tls-rancher-ingress
+    ```
+
+1. Restart Rancher
+
+    ```sh
+    kubectl rollout restart deploy/rancher -n cattle-system
+    ```
+
+1. Make sure the Rancher `cacerts` changed. Keep refreshing <https://172.18.0.2.sslip.io/cacerts> for a couple of minutes.
+
+1. Force a redeploy of Rancher agents on the downstream cluster:
+
+    ```sh
+    kubectl annotate clusters.management.cattle.io <CLUSTER_ID> io.cattle.agent.force.deploy=true
+    ```
+
+1. Select 'Force Update' for the clusters within the Continuous Delivery view of the Rancher UI to allow the fleet-agent in downstream clusters to successfully connect to Rancher.
